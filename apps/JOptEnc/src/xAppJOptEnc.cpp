@@ -215,7 +215,7 @@ bool xAppJPEG::readConfiguration()
   if(m_FrameRate <= 0) { m_ErrorLog += "!  FrameRate value have to be positive\n"; AnyError = true; }
 
   //jpeg-specific -----------------------------------------------------------------------------------------------------
-  m_Implementation  = m_CfgParser.cvtParam1stArg("Implementation"  , eImpl::Advanded, xStrToImpl);
+  m_Implementation  = m_CfgParser.cvtParam1stArg("Implementation"  , eImpl::Simple, xStrToImpl);
   m_Quality         = m_CfgParser.getParam1stArg("Quality"         , NOT_VALID);
   if(m_Quality < 0 || m_Quality > 100) { m_ErrorLog += "!  Quality value have to be in range [0-100]\n"; AnyError = true; }
   m_QuantTabLayout  = m_CfgParser.cvtParam1stArg("QuantTabLayout"   , eQTLa::Default, xStrToQTLa);
