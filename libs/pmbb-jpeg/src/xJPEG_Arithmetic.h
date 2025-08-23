@@ -6,8 +6,13 @@
 #include "xCommonDefJPEG.h"
 #include "xJFIF.h"
 #include "xBitstream.h"
+#include <cstdint>
+#include <iostream>
 #include <map>
+#include <numeric>   // For std::accumulate
+#include <stdexcept> // For std::runtime_error
 #include <queue>
+#include <vector>
 
 #define X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD 0
 
@@ -153,49 +158,94 @@ public:
 };
 
 //=====================================================================================================================================================================================
-
-class xArithmeticTabBuilder
+// A structure that stores the probability model for a single symbol.
+// // Defines its subinterval in the range [0, 1.0).
+struct SymbolProbability
 {
-protected:
-  class xArithTree
-  {
-  public:
-    int32 m_Symbol = NOT_VALID;
-    int64 m_Count  = NOT_VALID;
-
-    xArithTree* m_Left  = nullptr;
-    xArithTree* m_Right = nullptr;
-
-    xArithTree(int16 Symbol, int32 Count) { m_Symbol = Symbol; m_Count = Count; m_Left = nullptr; m_Right = nullptr; }
-    xArithTree(xArithTree* L, xArithTree* R) { m_Symbol = NOT_VALID; m_Count = L->m_Count + R->m_Count; m_Left = L; m_Right = R; }
-
-    ~xArithTree()
-    {
-      if(m_Left  != nullptr) { delete m_Left ; }
-      if(m_Right != nullptr) { delete m_Right; }
-    }
-  };
-
-  struct Comparator { bool operator()(const xArithTree* L, const xArithTree* R) const 
-  {
-    if(L->m_Count == R->m_Count)
-    {
-      return L->m_Symbol < R->m_Symbol;
-    }
-    return L->m_Count > R->m_Count;
-  } };
-
-public:
-  static void buildLengthTable(uint8* LengthTable, const uint32* SymbolCount, int32 Size);
-
-protected:
-  static void  xCalcCodeLengths  (uint8* CodeLengths, xArithTree* Node, int32 Length);
-  static flt64 xCalcAvgCodeLength(const uint8* CodeLength, const uint32* SymbolCount, int32 Size);
-
-public:
-  static flt64 calcAvgCodeLength (const xJFIF::xArithTable& ArithTable, const uint32* SymbolCount);
+    uint64_t lowerRange; // Beginning of the range (cumulative probability for this symbol)
+    uint64_t upperRange; // End of the range (lowerRange + probability for this symbol)
 };
+/**
+ * @class xArithmeticModelBuilder
+ * @brief Builds and stores a statistical model for arithmetic coding.
+ *
+ * This class replaces xArithmeticTabBuilder. Instead of generating variable-length bitcodes
+ * (as in Huffman coding), it computes
+ * cumulative probabilities for each symbol.
+ * Each symbol is assigned a unique subinterval in the range [0.0, 1.0) transformed to int,
+ * whose width corresponds to its probability of occurrence.
+ */
+class xArithmeticModelBuilder
+{
+public:
+    ProbabilityModel(const uint32_t* SymbolCount, int32_t Size)
+    {
+        if (Size <= 0) {
+            return; // Empty model
+        }
 
+    // 1. Count all symbols to get the grand total. 
+    // We use uint64_t to avoid overflow with large files.
+    m_totalNumberOfSymbols = std::accumulate(SymbolCount, SymbolCount + Size, 0ULL);
+
+    if (m_totalNumberOfSymbols == 0)
+    {
+        // If there are no symbols, the model cannot be built.
+        // You can throw an exception or leave the model empty.
+        throw std::runtime_error("Cannot build a probability model with zero symbols.");
+    }
+
+    // 2. Calculate the probabilities and create a table of cumulative probabilities.
+    m_model.resize(Size);
+    uint64_t cumulativeProbability = 0;
+
+        for (int32_t i = 0; i < Size; ++i)
+        {
+            // If a symbol is not present, its range has zero width.
+            if (SymbolCount[i] > 0)
+            {
+                //P(symbol) = number_of_occurrences(symbol) / total_number_of_symbols
+			    uint64_t probability = static_cast<uint64_t>(SymbolCount[i]) / m_totalNumberOfSymbols; //ugh int division - need to scale
+
+                m_model[i].lowerRange = cumulativeProbability;
+                cumulativeProbability += probability;
+                m_model[i].upperRange = cumulativeProbability;
+            }
+            else
+            {
+                // The symbol does not occur, so we assign it an empty range.
+                m_model[i].lowerRange = cumulativeProbability;
+                m_model[i].upperRange = cumulativeProbability;
+            }
+        }
+    }
+
+    /**
+     * @brief Returns the probability model for a given symbol.
+     * @param symbol Symbol index.
+     * @return Constant reference to a structure with a probability range.
+     */
+        const SymbolProbability& getSymbolModel(int32_t symbol) const
+        {
+            if (symbol >= m_model.size())
+            {
+                throw std::out_of_range("The symbol is outside the scope of the model.");
+            }
+            return m_model[symbol];
+        }
+
+        /**
+         * @brief Returns the total number of symbols counted.
+         */
+    uint64_t getTotalCount() const
+    {
+        return m_totalNumberOfSymbols;
+    }
+
+private:
+    uint64_t m_totalNumberOfSymbols = 0;
+    std::vector<SymbolProbability> m_model;
+};
 //=====================================================================================================================================================================================
 
 } //end of namespace PMBB::JPEG

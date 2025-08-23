@@ -286,32 +286,32 @@ bool xArithEstimatorAC::init(const xJFIF::xArithTable& ArithTable)
 }
 
 //=====================================================================================================================================================================================
-// xArithmeticTabBuilder
+// xArithmeticModelBuilder
 //=====================================================================================================================================================================================
 
-void xArithmeticTabBuilder::buildLengthTable(uint8* LengthTable, const uint32* SymbolCount, int32 Size)
+void xArithmeticModelBuilder::buildLengthTable(uint8* LengthTable, const uint32* SymbolCount, int32 Size)
 {
-  std::priority_queue<xArithTree*, std::vector<xArithTree*>, Comparator > ArithmeticTree;
+  std::priority_queue<xArithModel*, std::vector<xArithModel*>, Comparator > ArithmeticTree;
 
   //Before starting the procedure, the values of FREQ are collected for V = 0 to 255 and the FREQ value for V = 256 is set to 1 to reserve one code point
-  ArithmeticTree.push(new xArithTree((int16)Size, 1));
+  ArithmeticTree.push(new xArithModel((int16)Size, 1));
 	//insert values
 	for(int32 i=0; i< Size; i++)
 	{
 		if(SymbolCount[i])
 		{
-			ArithmeticTree.push(new xArithTree((int16)(i), SymbolCount[i]));
+			ArithmeticTree.push(new xArithModel((int16)(i), SymbolCount[i]));
 		}
 	}
 
 	//build Arithmetic tree
   while(ArithmeticTree.size() > 1)
   {
-    xArithTree* R = ArithmeticTree.top(); ArithmeticTree.pop();
-    xArithTree* L = ArithmeticTree.top(); ArithmeticTree.pop();
-    ArithmeticTree.push(new xArithTree(L, R));
+    xArithModel* R = ArithmeticTree.top(); ArithmeticTree.pop();
+    xArithModel* L = ArithmeticTree.top(); ArithmeticTree.pop();
+    ArithmeticTree.push(new xArithModel(L, R));
   }
-  xArithTree* Root = ArithmeticTree.top(); ArithmeticTree.pop();
+  xArithModel* Root = ArithmeticTree.top(); ArithmeticTree.pop();
 
 	//generate codes
   memset(LengthTable, 0, Size+1);
@@ -319,7 +319,7 @@ void xArithmeticTabBuilder::buildLengthTable(uint8* LengthTable, const uint32* S
   delete Root; Root = nullptr;
 }
 
-void xArithmeticTabBuilder::xCalcCodeLengths(uint8* LengthTable, xArithTree* Node, int32 Length)
+void xArithmeticModelBuilder::xCalcCodeLengths(uint8* LengthTable, xArithModel* Node, int32 Length)
 {
 	if(Node->m_Left==nullptr && Node->m_Right==nullptr)
 	{
@@ -333,7 +333,7 @@ void xArithmeticTabBuilder::xCalcCodeLengths(uint8* LengthTable, xArithTree* Nod
     xCalcCodeLengths(LengthTable, Node->m_Right, Length+1);
 	}
 }
-flt64 xArithmeticTabBuilder::xCalcAvgCodeLength(const uint8* CodeLength, const uint32* SymbolCount, int32 Size)
+flt64 xArithmeticModelBuilder::xCalcAvgCodeLength(const uint8* CodeLength, const uint32* SymbolCount, int32 Size)
 {
   int64 TotalCount  = 0;
   int64 TotalLength = 0;
@@ -357,7 +357,7 @@ flt64 xArithmeticTabBuilder::xCalcAvgCodeLength(const uint8* CodeLength, const u
 
   return AvgCodeLength;
 }
-flt64 xArithmeticTabBuilder::calcAvgCodeLength(const xJFIF::xArithTable& ArithTable, const uint32* SymbolCount)
+flt64 xArithmeticModelBuilder::calcAvgCodeLength(const xJFIF::xArithTable& ArithTable, const uint32* SymbolCount)
 {
   const int32 MaxNumCodesymbols = ArithTable.getMaxNumCodeSymbols();
   std::vector<uint8>ArithLengths(MaxNumCodesymbols);
