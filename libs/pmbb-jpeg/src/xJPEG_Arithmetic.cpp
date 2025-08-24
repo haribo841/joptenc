@@ -85,185 +85,86 @@ void xArithCommon::xAvoidZeroLenCodes(uint8* ArithLen, int32 TableSize)
 //=============================================================================================================================================================================
 // xArithDecoder
 //=====================================================================================================================================================================================
-bool xArithDecoder::xInitTables(const xJFIF::xArithTable& ArithTable)
+void xArithDecoder::start(xBitstreamReader* bitstream)
 {
-  const xJFIF::xArithTable::tCodeL& TabCodeLengths = ArithTable.getCodeLengths();
-  const xJFIF::tByteV&             TabCodeSymbols = ArithTable.getCodeSymbols();
+    m_bitstream = bitstream;
+    m_low = 0;
+    m_high = TOP_VALUE;
 
-  uint32 TmpCode[257];
-  uint8  TmpLen [257];
-
-  //copy code symbols from ArithTable
-  memset(m_CodeSymbols, 0, 256);
-  memcpy(m_CodeSymbols, TabCodeSymbols.data(), TabCodeSymbols.size());
-
-  //generate length
-  int32 NumLengths = xFillTmpLengths(TmpLen, TabCodeLengths);
-  if(NumLengths == NOT_VALID) { return false; }
-
-  //generate codes
-  bool Result = xFillTmpCodes(TmpCode, TmpLen, NumLengths);
-  if(!Result) { return false; }
-
-  {
-    int32 p = 0;
-    for(int32 l = 1; l <= 16; l++)
+    // Read the initial bits from the stream to fill the value buffer.
+    m_value = 0;
+    for (int i = 0; i < 64; ++i)
     {
-      if(TabCodeLengths[l - 1])
-      {
-        m_ValOffset[l] = p - (int32)TmpCode[p];
-        p += TabCodeLengths[l - 1];
-        m_MaxCode[l] = TmpCode[p - 1];
-      }
-      else
-      {
-        m_MaxCode[l] = -1;
-      }
+        m_value = (m_value << 1) | m_bitstream->readBit();
     }
-    m_ValOffset[17] = 0;
-    m_MaxCode  [17] = 0xFFFFFL;
-  }
-
-#if X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
-  for(int32 i = 0; i < (1 << c_LookAhead1st); i++)
-  {
-    m_Lookup1st[i] = (uint16)((c_LookAhead1st + 1) << c_LookAhead1st);
-  }
-  {
-    int32 p = 0;
-    for(int32 l = 1; l <= c_LookAhead1st; l++)
-    {
-      for(uint32 i = 1; i <= (int32)TabCodeLengths[l - 1]; i++, p++)
-      {
-        int32 LookBits = TmpCode[p] << (c_LookAhead1st - l);
-        for(int32 ctr = 1 << (c_LookAhead1st - l); ctr > 0; ctr--)
-        {
-          m_Lookup1st[LookBits] = (l << c_LookAhead1st) | TabCodeSymbols[p];
-          LookBits++;
-        }
-      }
-    }
-  }
-
-  for(int32 i = 0; i < (1 << c_LookAhead2nd); i++)
-  {
-    m_Lookup2nd[i] = (uint32)((c_LookAhead2nd + 1) << c_LookAhead2nd);
-  }
-  {
-    int32 p = 0;
-    for(uint32 l = 1; l <= c_LookAhead2nd; l++)
-    {
-      for(int32 i = 1; i <= (int32)TabCodeLengths[l - 1]; i++, p++)
-      {
-        int32 LookBits = TmpCode[p] << (c_LookAhead2nd - l);
-        for(int32 ctr = 1 << (c_LookAhead2nd - l); ctr > 0; ctr--)
-        {
-          m_Lookup2nd[LookBits] = ((l << c_LookAhead2nd) | TabCodeSymbols[p]);
-          LookBits++;
-        }
-      }
-    }
-  }
-
-#else //X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
-
-  for(int32 i = 0; i < (1 << c_LookAhead); i++)
-  {
-    m_Lookup[i] = (c_LookAhead + 1) << c_LookAhead;
-  }
-  {
-    int32 p = 0;
-    for(int32 l = 1; l <= c_LookAhead; l++)
-    {
-      for(int32 i = 1; i <= (int32)TabCodeLengths[l - 1]; i++, p++)
-      {
-        int32 LookBits = TmpCode[p] << (c_LookAhead - l);
-        for(int32 ctr = 1 << (c_LookAhead - l); ctr > 0; ctr--)
-        {
-          m_Lookup[LookBits] = (l << c_LookAhead) | TabCodeSymbols[p];
-          LookBits++;
-        }
-      }
-    }
-  }
-
-#endif //X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
-
-  if (ArithTable.isDC())
-  {
-    for (int32 i = 0; i < NumLengths; i++)
-    {
-      int sym = TabCodeSymbols[i];
-      if(sym < 0 || sym > 15) { return false; }
-    }
-  }
-
-  return true;
 }
 
-#if X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
-int32 readPrefix(xBitstreamReader* Bitstream)
+int64_t xArithDecoder::decode(const xArithmeticProbabilityModel& model)
 {
-  uint32 Peek1st    = Bitstream->peekBits(c_LookAhead1st);
-  uint32 Lockup1st  = m_Lookup1st[Peek1st];
-  uint32 NumBits1st = Lockup1st >> c_LookAhead1st;
+    // Step 1: Find the symbol
+    // This is done by mapping the current value in the [low, high] range
+    // to the corresponding cumulative frequency in the model.
+    const uint64_t range = m_high - m_low + 1;
+    const uint64_t totalCount = model.getTotalCount();
+    const uint64_t scaled_value = ((m_value - m_low + 1) * totalCount - 1) / range;
 
-  if(NumBits1st <= c_LookAhead1st)
-  {
-    Bitstream->skipBits(NumBits1st);
-    return Lockup1st & ((1 << c_LookAhead1st) - 1);
-  }
-  else
-  {
-    uint32 Peek2nd    = Bitstream->peekBits(c_LookAhead2nd);
-    uint32 Lockup2nd  = m_Lookup2nd[Peek2nd];
-    uint32 NumBits2nd = Lockup2nd >> c_LookAhead2nd;
-    if(NumBits2nd <= c_LookAhead2nd)
-    {
-      Bitstream->skipBits(NumBits2nd);
-      return Lockup2nd & ((1 << c_LookAhead2nd) - 1);
-    }
-    else
-    {
-      int32 S = Bitstream->readBits(NumBits2nd);
-      while(S > m_MaxCode[NumBits2nd])
-      {
-        S <<= 1;
-        S |= Bitstream->readBit();
-        NumBits2nd++;
-      }
-      S = m_CodeSymbols[(S + m_ValOffset[NumBits2nd]) & 0xFF];
-      return S;
-    }
-  }
+    // Find the symbol 's' where: lowerCount[s] <= scaled_value < upperCount[s]
+    int64_t symbol = model.findSymbol(scaled_value);
+    const SymbolModel& s = model.getSymbolModel(symbol);
+
+    // Step 2: Update the range
+    // Narrow the range to match the decoded symbol's sub-interval.
+    m_high = m_low + (range * s.upperCount) / totalCount - 1;
+    m_low = m_low + (range * s.lowerCount) / totalCount;
+
+    // Step 3: Renormalize
+    // Keep the interval wide enough to maintain precision.
+    renormalize();
+
+    return symbol;
 }
-#else //X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
-int32 xArithDecoder::readPrefix(xBitstreamReader* Bitstream)
+
+void xArithDecoder::renormalize()
 {
-  uint32 Peek    = Bitstream->peekBits(c_LookAhead);
-  uint32 Lockup  = m_Lookup[Peek];
-  uint32 NumBits = Lockup >> c_LookAhead;
-
-  if(NumBits <= c_LookAhead)
-  {
-    Bitstream->skipBits(NumBits);
-    return Lockup & ((1 << c_LookAhead) - 1);
-  }
-  else
-  {
-    int32 S = Bitstream->readBits(NumBits);
-    while(S > m_MaxCode[NumBits])
+    while (true)
     {
-      S <<= 1;
-      S |= Bitstream->readBit();
-      NumBits++;
+        // Case 1: MSBs of low and high are the same. Shift them out.
+        if ((m_low >> 63) == (m_high >> 63))
+        {
+            m_low <<= 1;
+            m_high = (m_high << 1) | 1;
+            m_value = (m_value << 1) | m_bitstream->readBit();
+        }
+        // Case 2: Underflow is possible. The range is straddling the midpoint.
+        else if ((m_low >= FIRST_QUARTER) && (m_high < THIRD_QUARTER))
+        {
+            m_low = (m_low - FIRST_QUARTER) * 2;
+            m_high = (m_high - FIRST_QUARTER) * 2 + 1;
+            m_value = (m_value - FIRST_QUARTER) * 2 | m_bitstream->readBit();
+        }
+        // Case 3: Range is wide enough. Stop.
+        else
+        {
+            break;
+        }
     }
-    S = m_CodeSymbols[(S + m_ValOffset[NumBits]) & 0xFF];
-    return S;
-  }    
 }
-#endif //X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
 
+int64_t xArithDecoder::readSufix(xBitstreamReader* bitstream, int64_t numBits)
+{
+    if (numBits == 0) { return 0; }
+    int64_t R = bitstream->readBits(numBits);
+    // This logic correctly converts the JPEG suffix to a signed value.
+    int64_t Value = R + (((R - (1 << (numBits - 1))) >> 31) & ((((uint64_t)-1) << numBits) + 1));
+    return Value;
+}
+
+int64_t xArithDecoder::readDC(xBitstreamReader* bitstream, const xArithmeticProbabilityModel& model)
+{
+    // The decoded symbol represents the number of bits in the suffix.
+    int64_t numBits = decode(model);
+    return readSufix(bitstream, numBits);
+}
 
 //=============================================================================================================================================================================
 // xArithEstimator
@@ -286,10 +187,10 @@ bool xArithEstimatorAC::init(const xJFIF::xArithTable& ArithTable)
 }
 
 //=====================================================================================================================================================================================
-// xArithmeticModelBuilder
+// xArithmeticProbabilityModel
 //=====================================================================================================================================================================================
 
-void xArithmeticModelBuilder::buildLengthTable(uint8* LengthTable, const uint32* SymbolCount, int32 Size)
+void xArithmeticProbabilityModel::buildLengthTable(uint8* LengthTable, const uint32* SymbolCount, int32 Size)
 {
   std::priority_queue<xArithModel*, std::vector<xArithModel*>, Comparator > ArithmeticTree;
 
@@ -319,7 +220,7 @@ void xArithmeticModelBuilder::buildLengthTable(uint8* LengthTable, const uint32*
   delete Root; Root = nullptr;
 }
 
-void xArithmeticModelBuilder::xCalcCodeLengths(uint8* LengthTable, xArithModel* Node, int32 Length)
+void xArithmeticProbabilityModel::xCalcCodeLengths(uint8* LengthTable, xArithModel* Node, int32 Length)
 {
 	if(Node->m_Left==nullptr && Node->m_Right==nullptr)
 	{
@@ -333,7 +234,7 @@ void xArithmeticModelBuilder::xCalcCodeLengths(uint8* LengthTable, xArithModel* 
     xCalcCodeLengths(LengthTable, Node->m_Right, Length+1);
 	}
 }
-flt64 xArithmeticModelBuilder::xCalcAvgCodeLength(const uint8* CodeLength, const uint32* SymbolCount, int32 Size)
+flt64 xArithmeticProbabilityModel::xCalcAvgCodeLength(const uint8* CodeLength, const uint32* SymbolCount, int32 Size)
 {
   int64 TotalCount  = 0;
   int64 TotalLength = 0;
@@ -357,7 +258,7 @@ flt64 xArithmeticModelBuilder::xCalcAvgCodeLength(const uint8* CodeLength, const
 
   return AvgCodeLength;
 }
-flt64 xArithmeticModelBuilder::calcAvgCodeLength(const xJFIF::xArithTable& ArithTable, const uint32* SymbolCount)
+flt64 xArithmeticProbabilityModel::calcAvgCodeLength(const xJFIF::xArithTable& ArithTable, const uint32* SymbolCount)
 {
   const int32 MaxNumCodesymbols = ArithTable.getMaxNumCodeSymbols();
   std::vector<uint8>ArithLengths(MaxNumCodesymbols);

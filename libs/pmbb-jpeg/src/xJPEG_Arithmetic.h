@@ -34,73 +34,250 @@ public:
 
 class xArithDecoder : public xArithCommon
 {
-protected:
-#if X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
-  static const int32 c_LookAhead1st =  8; //fixed size
-  static const int32 c_LookAhead2nd = 16; //fixed size
-#else
-  static const int32 c_LookAhead    = 10; //can be up to 16
-#endif
-
-  uint8  m_CodeSymbols[256];
-  int32  m_MaxCode    [18 ]; //largest code of length k (-1 if none)
-  int32  m_ValOffset  [18 ]; //Arithval[] offset for codes of length k
-#if X_PMBB_JPEG_MULTI_LEVEL_LOOKAHEAD
-  uint16 m_Lookup1st  [1<<c_LookAhead1st];
-  uint32 m_Lookup2nd  [1<<c_LookAhead2nd];
-#else
-  uint32  m_Lookup    [1<<c_LookAhead   ];
-#endif
-
 public:
-  bool init(const xJFIF::xArithTable& ArithTable)
-  {     
-    //return xCreateDerrivedDecoder(m_CodeSymbols, m_MaxCode, m_ValOffset, m_Lookup, ArithTable);
-    return xInitTables(ArithTable);
-  }
-  int32 readPrefix(xBitstreamReader* Bitstream);
-  int32 readSufix(xBitstreamReader* Bitstream, int32 NumBits)
-  {
-    int32 R = Bitstream->readBits(NumBits);
-    int32 Value = R + (((R - (1 << (NumBits - 1))) >> 31) & ((((uint32)-1) << NumBits) + 1));
-    return Value;
-  }
-  int32 readDC(xBitstreamReader* Bitstream)
-  {
-    int32 DC = readPrefix(Bitstream);
-    if(DC) { DC = readSufix(Bitstream, DC); }
-    return DC;
-  }
+    xArithDecoder() = default;
 
-protected:
-  bool xInitTables(const xJFIF::xArithTable& ArithTable);
+    /**
+     * @brief Starts the decoder and initializes its state from the bitstream.
+     * @param bitstream The bitstream to read from.
+     */
+    void start(xBitstreamReader* bitstream);
 
+    /**
+     * @brief Decodes a single symbol using the provided probability model.
+     * @param model The probability model to use for decoding.
+     * @return The decoded symbol.
+     */
+    int32_t decode(const xArithmeticProbabilityModel& model);
+
+    /**
+     * @brief A convenience function to decode a DC coefficient.
+     * It decodes the prefix code and then reads the suffix bits.
+     * @param bitstream The bitstream to read from.
+     * @param model The probability model for DC coefficients.
+     * @return The decoded DC value.
+     */
+    int32_t readDC(xBitstreamReader* bitstream, const xArithmeticProbabilityModel& model);
+
+private:
+    /**
+     * @brief Renormalizes the range [m_low, m_high] by shifting out common
+     * most significant bits and reading new bits into m_value.
+     */
+    void renormalize();
+
+    /**
+     * @brief Reads the suffix bits for a decoded symbol and computes the final value.
+     * @param bitstream The bitstream to read from.
+     * @param numBits The number of suffix bits to read.
+     * @return The final coefficient value.
+     */
+    int32_t readSufix(xBitstreamReader* bitstream, int32_t numBits);
+
+    // State variables for the decoder
+    uint64_t m_low;
+    uint64_t m_high;
+    uint64_t m_value; // Holds the current value from the bitstream
+    xBitstreamReader* m_bitstream = nullptr;
+
+    // Constants matching the encoder
+    static constexpr uint64_t TOP_VALUE = 0xFFFFFFFFFFFFFFFFULL;
+    static constexpr uint64_t FIRST_QUARTER = 0x4000000000000000ULL;
+    static constexpr uint64_t THIRD_QUARTER = 0xC000000000000000ULL;
+};
+
+//=====================================================================================================================================================================================
+/**
+ * @class xArithmeticEncoder
+ * @brief Performs arithmetic encoding of a sequence of symbols using 64-bit integer math.
+ */
+class xArithmeticEncoder
+{
+public:
+    xArithmeticEncoder() = default;
+
+    /**
+     * @brief Initializes the encoder and associates it with a bitstream.
+     */
+    void start(xBitstreamWriter* bitstream)
+    {
+        m_bitstream = bitstream;
+        m_low = 0;
+        m_high = TOP_VALUE;
+        m_pending_bits = 0;
+    }
+
+    /**
+     * @brief Encodes a single symbol.
+     * @param symbol The symbol to be encoded.
+     * @param model The probability model to use for encoding.
+     */
+    void encode(int32_t symbol, const xArithmeticProbabilityModel& model)
+    {
+        // 1. Update the range based on the symbol's probability ("zoom in")
+        const uint64_t range = m_high - m_low + 1;
+        const SymbolModel& s = model.getSymbolModel(symbol);
+        const uint64_t totalCount = model.getTotalCount();
+
+        m_high = m_low + (range * s.upperCount) / totalCount - 1;
+        m_low = m_low + (range * s.lowerCount) / totalCount;
+
+        // 2. Renormalize the range and output any determined bits
+        renormalize();
+    }
+
+    /**
+     * @brief Finalizes the encoding process, writing any remaining bits.
+     */
+    void finish()
+    {
+        // Output enough bits to uniquely resolve the final interval.
+        m_pending_bits++;
+        if (m_low < FIRST_QUARTER) { writeBit(0); }
+        else { writeBit(1); }
+
+        m_bitstream->flush();
+    }
+
+private:
+    inline void xArithDecoder::start(xBitstreamReader* bitstream)
+    {
+    }
+    inline int32_t xArithDecoder::decode(const xArithmeticProbabilityModel& model)
+    {
+        return 0;
+    }
+    inline int32_t xArithDecoder::readDC(xBitstreamReader* bitstream, const xArithmeticProbabilityModel& model)
+    {
+        return 0;
+    }
+    void renormalize()
+    {
+        while (true)
+        {
+            // Case 1: MSBs of low and high are the same. Output the bit.
+            if ((m_low >> 63) == (m_high >> 63))
+            {
+                writeBit(m_low >> 63);
+                m_low <<= 1;
+                m_high = (m_high << 1) | 1;
+            }
+            // Case 2: Underflow. The range is straddling the midpoint.
+            else if ((m_low >= FIRST_QUARTER) && (m_high < THIRD_QUARTER))
+            {
+                m_pending_bits++;
+                m_low = (m_low - FIRST_QUARTER) * 2;
+                m_high = (m_high - FIRST_QUARTER) * 2 + 1;
+            }
+            // Case 3: Range is wide enough. Stop renormalizing for now.
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    inline int32_t xArithDecoder::readSufix(xBitstreamReader* bitstream, int32_t numBits)
+    {
+        return 0;
+    }
+
+    void writeBit(bool bit)
+    {
+        m_bitstream->writeBit(bit);
+        // Write any pending bits now that the ambiguity is resolved
+        for (; m_pending_bits > 0; m_pending_bits--)
+        {
+            m_bitstream->writeBit(!bit);
+        }
+    }
+
+    // State variables
+    uint64_t m_low;
+    uint64_t m_high;
+    uint64_t m_pending_bits;
+    xBitstreamWriter* m_bitstream = nullptr;
+
+    // Constants for 64-bit arithmetic as described
+    static constexpr uint64_t TOP_VALUE = 0xFFFFFFFFFFFFFFFFULL;
+    static constexpr uint64_t FIRST_QUARTER = 0x4000000000000000ULL;
+    static constexpr uint64_t THIRD_QUARTER = 0xC000000000000000ULL;
 };
 
 //=====================================================================================================================================================================================
 
 class xArithEncoderDC : public xArithCommon
 {
-protected:
-  uint32 m_ArithCode[xJPEG_Constants::c_MaxNumCodeSymbolsDC];
-  uint8  m_ArithLen [xJPEG_Constants::c_MaxNumCodeSymbolsDC];
+    xArithmeticProbabilityModel m_model;
+    xArithmeticEncoder          m_encoder;
+    xBitstreamWriter* m_bitstream = nullptr;
 
 public:
-  bool init    (const xJFIF::xArithTable& ArithTable) { if(ArithTable.getClass() != xJFIF::xArithTable::eArithClass::DC) { return false; } return xInitArithTables(m_ArithLen, m_ArithCode, ArithTable); }
-  void writeDC (xBitstreamWriter* Bitstream, int32 NumBits, uint32 Remainder) { Bitstream->writeBits(m_ArithCode[NumBits], m_ArithLen[NumBits]); if(NumBits) { Bitstream->writeBits(Remainder, NumBits); } }
+    // Initializes the encoder with a probability model built from symbol counts.
+    bool init(const xArithCounterDC& counter)
+    {
+        m_model.build(counter.getSymbolCount(), xJPEG_Constants::c_MaxNumCodeSymbolsDC);
+        return true;
+    }
+
+    // Starts the encoding process and links to a bitstream.
+    void start(xBitstreamWriter* bitstream)
+    {
+        m_bitstream = bitstream;
+        m_encoder.start(bitstream);
+    }
+
+    // Encodes a DC symbol and writes the suffix bits.
+    void writeDC(int32_t numBits, uint32_t remainder)
+    {
+        m_encoder.encode(numBits, m_model);
+        if (numBits > 0) { m_bitstream->writeBits(remainder, numBits); }
+    }
+
+    // Finalizes the bitstream.
+    void finish()
+    {
+        m_encoder.finish();
+    }
 };
 
 class xArithEncoderAC : public xArithCommon
 {
 protected:
-  uint32 m_ArithCode[xJPEG_Constants::c_MaxNumCodeSymbolsAC];
-  uint8  m_ArithLen [xJPEG_Constants::c_MaxNumCodeSymbolsAC];
+    xArithmeticProbabilityModel m_model;
+    xArithmeticEncoder          m_encoder;
+    xBitstreamWriter* m_bitstream = nullptr;
 
 public:
-  bool init    (xJFIF::xArithTable& ArithTable) { if(ArithTable.getClass() != xJFIF::xArithTable::eArithClass::AC) { return false; } return xInitArithTables(m_ArithLen, m_ArithCode, ArithTable); }
-  void writeAC (xBitstreamWriter* Bitstream, int32 Code, int32 NumBits, uint32 Remainder) { Bitstream->writeBits(m_ArithCode[Code], m_ArithLen[Code]); Bitstream->writeBits(Remainder, NumBits); }
-  void writeZRL(xBitstreamWriter* Bitstream) { Bitstream->writeBits(m_ArithCode[0xF0], m_ArithLen[0xF0]); }
-  void writeEOB(xBitstreamWriter* Bitstream) { Bitstream->writeBits(m_ArithCode[0x00], m_ArithLen[0x00]); }
+    // Initializes the encoder with a probability model built from symbol counts.
+    bool init(const xArithCounterAC& counter)
+    {
+        m_model.build(counter.getSymbolCount(), xJPEG_Constants::c_MaxNumCodeSymbolsAC);
+        return true;
+    }
+
+    // Starts the encoding process and links to a bitstream.
+    void start(xBitstreamWriter* bitstream)
+    {
+        m_bitstream = bitstream;
+        m_encoder.start(bitstream);
+    }
+
+    // Encodes an AC symbol and writes the suffix bits.
+    void writeAC(int32_t code, int32_t numBits, uint32_t remainder)
+    {
+        m_encoder.encode(code, m_model);
+        if (numBits > 0) { m_bitstream->writeBits(remainder, numBits); }
+    }
+
+    // Encodes the Zero Run Length (ZRL) special symbol.
+    void writeZRL() { m_encoder.encode(0xF0, m_model); }
+
+    // Encodes the End of Block (EOB) special symbol.
+    void writeEOB() { m_encoder.encode(0x00, m_model); }
+
+    // Finalizes the bitstream.
+    void finish() { m_encoder.finish(); }
 };
 
 //=====================================================================================================================================================================================
@@ -158,93 +335,85 @@ public:
 };
 
 //=====================================================================================================================================================================================
-// A structure that stores the probability model for a single symbol.
-// // Defines its subinterval in the range [0, 1.0).
-struct SymbolProbability
+// A structure that stores the cumulative counts for a single symbol.
+struct SymbolModel
 {
-    uint64_t lowerRange; // Beginning of the range (cumulative probability for this symbol)
-    uint64_t upperRange; // End of the range (lowerRange + probability for this symbol)
+    uint64_t lowerCount; // Beginning of the range (cumulative count)
+    uint64_t upperCount; // End of the range (lowerCount + symbol count)
 };
 /**
- * @class xArithmeticModelBuilder
+ * @class xArithmeticProbabilityModel
  * @brief Builds and stores a statistical model for arithmetic coding.
  *
- * This class replaces xArithmeticTabBuilder. Instead of generating variable-length bitcodes
- * (as in Huffman coding), it computes
- * cumulative probabilities for each symbol.
- * Each symbol is assigned a unique subinterval in the range [0.0, 1.0) transformed to int,
- * whose width corresponds to its probability of occurrence.
+ * This class computes cumulative frequencies for each symbol, which are
+ * required by the arithmetic encoder to partition the coding range.
  */
-class xArithmeticModelBuilder
+class xArithmeticProbabilityModel
 {
-public:
-    ProbabilityModel(const uint32_t* SymbolCount, int32_t Size)
-    {
-        if (Size <= 0) {
-            return; // Empty model
-        }
-
-    // 1. Count all symbols to get the grand total. 
-    // We use uint64_t to avoid overflow with large files.
-    m_totalNumberOfSymbols = std::accumulate(SymbolCount, SymbolCount + Size, 0ULL);
-
-    if (m_totalNumberOfSymbols == 0)
-    {
-        // If there are no symbols, the model cannot be built.
-        // You can throw an exception or leave the model empty.
-        throw std::runtime_error("Cannot build a probability model with zero symbols.");
-    }
-
-    // 2. Calculate the probabilities and create a table of cumulative probabilities.
-    m_model.resize(Size);
-    uint64_t cumulativeProbability = 0;
-
-        for (int32_t i = 0; i < Size; ++i)
-        {
-            // If a symbol is not present, its range has zero width.
-            if (SymbolCount[i] > 0)
-            {
-                //P(symbol) = number_of_occurrences(symbol) / total_number_of_symbols
-			    uint64_t probability = static_cast<uint64_t>(SymbolCount[i]) / m_totalNumberOfSymbols; //ugh int division - need to scale
-
-                m_model[i].lowerRange = cumulativeProbability;
-                cumulativeProbability += probability;
-                m_model[i].upperRange = cumulativeProbability;
-            }
-            else
-            {
-                // The symbol does not occur, so we assign it an empty range.
-                m_model[i].lowerRange = cumulativeProbability;
-                m_model[i].upperRange = cumulativeProbability;
-            }
-        }
-    }
+    xArithmeticProbabilityModel() = default;
 
     /**
-     * @brief Returns the probability model for a given symbol.
-     * @param symbol Symbol index.
-     * @return Constant reference to a structure with a probability range.
+     * @brief Builds the probability model from an array of symbol counts.
+     * @param SymbolCount Pointer to an array with symbol frequencies.
+     * @param Size The number of symbols in the alphabet.
      */
-        const SymbolProbability& getSymbolModel(int32_t symbol) const
-        {
-            if (symbol >= m_model.size())
-            {
-                throw std::out_of_range("The symbol is outside the scope of the model.");
-            }
-            return m_model[symbol];
+public:
+    void build(const uint32_t* SymbolCount, int32_t Size)
+    {
+        if (Size <= 0) {
+            m_totalCount = 0;
+            m_model.clear();
+            return;
         }
 
-        /**
-         * @brief Returns the total number of symbols counted.
-         */
-    uint64_t getTotalCount() const
+        // 1. Sum all symbol counts to get the total. Use uint64_t to prevent overflow.
+        m_totalCount = std::accumulate(SymbolCount, SymbolCount + Size, 0ULL);
+
+        if (m_totalCount == 0)
+        {
+            throw std::runtime_error("Cannot build a probability model with zero total frequency.");
+        }
+
+        // 2. Calculate the cumulative counts for each symbol.
+        m_model.resize(Size);
+        uint64_t cumulativeCount = 0;
+        for (int32_t i = 0; i < Size; ++i)
+        {
+            m_model[i].lowerCount = cumulativeCount;
+            cumulativeCount += SymbolCount[i];
+            m_model[i].upperCount = cumulativeCount;
+        }
+    }
+
+    const SymbolModel& getSymbolModel(int32_t symbol) const
     {
-        return m_totalNumberOfSymbols;
+        if (symbol < 0 || static_cast<size_t>(symbol) >= m_model.size())
+        {
+            throw std::out_of_range("Symbol index is out of range.");
+        }
+        return m_model[symbol];
+    }
+
+    uint64_t getTotalCount() const { return m_totalCount; }
+
+    int64_t findSymbol(uint64_t scaled_value) const
+    {
+        // Perform a binary search or linear scan to find the symbol
+        // For simplicity, a linear scan is shown here. A binary search would be faster.
+        for (size_t i = 0; i < m_model.size(); ++i)
+        {
+            if (scaled_value < m_model[i].upperCount)
+            {
+                return static_cast<int64_t>(i);
+            }
+        }
+        // Should not be reached if scaled_value is valid
+        throw std::runtime_error("Could not find symbol for the given scaled value.");
     }
 
 private:
-    uint64_t m_totalNumberOfSymbols = 0;
-    std::vector<SymbolProbability> m_model;
+    uint64_t m_totalCount = 0;
+    std::vector<SymbolModel> m_model;
 };
 //=====================================================================================================================================================================================
 
