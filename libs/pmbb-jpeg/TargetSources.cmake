@@ -4,8 +4,8 @@ set(SRCLIST_COMMON_C src/xCommonJPEG.cpp)
 set(SRCLIST_CONST_H src/xJPEG_Constants.h  )
 set(SRCLIST_CONST_C src/xJPEG_Constants.cpp)
 
-set(SRCLIST_BLOCKS_H src/xJPEG_Entropy.h   src/xJPEG_Huffman.h   src/xJPEG_HuffmanDefault.h   src/xJPEG_Quant.h   src/xJPEG_Scan.h   src/xJPEG_Transform.h   src/xJPEG_TransformConstants.h  )
-set(SRCLIST_BLOCKS_C src/xJPEG_Entropy.cpp src/xJPEG_Huffman.cpp src/xJPEG_HuffmanDefault.cpp src/xJPEG_Quant.cpp src/xJPEG_Scan.cpp src/xJPEG_Transform.cpp src/xJPEG_TransformConstants.cpp)
+set(SRCLIST_BLOCKS_H src/xJPEG_Entropy.h   src/xJPEG_Arithmetic.h   src/xJPEG_Huffman.h    src/xJPEG_HuffmanDefault.h   src/xJPEG_Quant.h   src/xJPEG_Scan.h   src/xJPEG_Transform.h   src/xJPEG_TransformConstants.h  )
+set(SRCLIST_BLOCKS_C src/xJPEG_Entropy.cpp src/xJPEG_Arithmetic.cpp  src/xJPEG_Huffman.cpp src/xJPEG_HuffmanDefault.cpp src/xJPEG_Quant.cpp src/xJPEG_Scan.cpp src/xJPEG_Transform.cpp src/xJPEG_TransformConstants.cpp)
 
 set(SRCLIST_CONTAINER_H src/xJFIF.h  )
 set(SRCLIST_CONTAINER_C src/xJFIF.cpp)
