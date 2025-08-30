@@ -5,7 +5,25 @@
 #include "xJPEG_Arithmetic.h"
 #include <stdexcept>
 namespace PMBB_NAMESPACE::JPEG {
-
+    std::vector<bool> hexToBitVector(const std::string& hexString) {
+        std::vector<bool> bitVector;
+        for (char hexDigit : hexString) {
+            uint8_t value = 0;
+            if (hexDigit >= '0' && hexDigit <= '9') {
+                value = hexDigit - '0';
+            }
+            else if (hexDigit >= 'A' && hexDigit <= 'F') {
+                value = hexDigit - 'A' + 10;
+            }
+            else if (hexDigit >= 'a' && hexDigit <= 'f') {
+                value = hexDigit - 'a' + 10;
+            }
+            for (int i = 3; i >= 0; --i) {
+                bitVector.push_back((value >> i) & 1);
+            }
+        }
+        return bitVector;
+    }
     // Table D.3 – Qe values and probability estimation state machine
     const std::array<StateEntry, xQeModel::getNumStates()> STATIC_STATE_TABLE =
     {
@@ -223,6 +241,37 @@ namespace PMBB_NAMESPACE::JPEG {
 }
     */
 
+    void xArithCoreEnc::finish()
+    {
+        //FLUSH (D.1.4) from the JPEG standard.
+            //It ensures that all buffered information is saved correctly.
+
+            // Step 1: We finalize the C register to point to the end of the last interval.
+            // We add (m_A - 1) to choose the highest possible value in the interval [C, C + A).
+        m_C = m_C + m_A - 1;
+
+        // Step 2: We force the last two bytes from the C register to be written.
+        // We use the existing mechanism with the m_CT counter and the writeByte() function,
+        // to properly handle bit buffering and inserting "stuffing" bits after 0xFF.
+
+        // We shift bits in register C to prepare them for writing.
+        // The number of shifts depends on how many bits are already left in the buffer (m_CT).
+        if (m_CT <= 0) { m_CT = 8; } // We reset the counter if it is already zero.
+        m_C <<= (8 - m_CT);
+        m_CT = 0; // We mark the bit buffer as ready for writing.
+
+        // We write the first of the two final bytes.
+        writeByte();
+
+        // We shift C again to prepare the second byte and write it.
+        m_C <<= 8;
+        m_CT = 0;
+        writeByte();
+
+        // Step 3: We finalize the bitstream object itself (e.g. by writing the padding bits).
+        m_Bitstream.flushToBuffer();
+    }
+
     void xArithCoreEnc::renormalize()
     {
         do {
@@ -290,173 +339,15 @@ namespace PMBB_NAMESPACE::JPEG {
 
     //=============================================================================================================================================================================
 
-    /*to be removed const xContextModel::ContextState& xContextModel::getContextState(size_t context_index) const {
-        if (context_index >= contexts.size()) {
-            throw std::out_of_range("Context index is out of range.");
-        }
-        return contexts[context_index];
+    void xArithCoreDec::start(std::function<bool(void)> const& callback) {
+        // TODO: implementation
+    }
+    unsigned int xArithCoreDec::decodeBinMP(xArithCoreModel const& model) {
+        // TODO: implementation
+        return 0;
     }
 
-    void xContextModel::updateContextState(size_t context_index, uint8_t new_index, bool new_mps) {
-        if (context_index >= contexts.size()) {
-            throw std::out_of_range("Context index is out of range.");
-        }
-        contexts[context_index].index = new_index;
-        contexts[context_index].mps = new_mps;
-    }
-
-    xArithmeticEncoder::xArithmeticEncoder(xContextModel & model, xBitStream & stream)
-        : context_model(model), bit_stream(stream), C_register(0), A_register(0) {
-    } // The constructor remembers references to the passed objects.
-
-    void xArithmeticEncoder::initialize() {
-        A_register = 0x10000; // Initialization of registers
-        C_register = 0;
-        // ... TODO
-        // Other auxiliary variables like bit counter (CT) etc.
-    }
-
-    void xArithmeticEncoder::encode(bool decision, size_t context_index) {
-
-        const auto& currentState = context_model.getContextState(context_index); // Get the current state of "Bin" from "Model"
-
-        bool is_mps = (decision == currentState.mps); // Determine whether the decision being coded is MPS or LPS
-
-        updateModel(context_index, is_mps);
-    }
-
-    void xArithmeticEncoder::flush() {
-        // Get the old state to find the appropriate transition
-        // WIP
-        bit_stream.finalize();
-    }
-
-    void xArithmeticEncoder::updateModel(size_t context_index, bool was_mps) {
-
-        const auto& oldState = context_model.getContextState(context_index); // Get the old state to find the appropriate transition
-        const auto& staticEntry = xQeModel::getInstance().getEntry(oldState.index);
-
-        uint8_t new_index;
-        bool new_mps = oldState.mps; // MPS does not change by default
-
-        if (was_mps) {
-            new_index = staticEntry.next_index_mps;
-        }
-        else {
-            new_index = staticEntry.next_index_lps;
-            if (staticEntry.switch_mps) {
-                new_mps = !new_mps; // Invert MPS sense if flag is set
-            }
-        }
-
-        context_model.updateContextState(context_index, new_index, new_mps); // Save the new, "changed" state to the model
-    }
-
-    void xArithmeticEncoderCore::start()
-    {
-        m_low = 0;
-        m_high = TOP_VALUE;
-        m_pending_bits = 0;
-    }
-
-    void xArithmeticEncoderCore::encode(int32_t symbol, const xArithmeticProbabilityModel & model, const tBitWriter & bit_writer)
-    {
-        // 1. Update the interval based on the symbol probability
-        const uint64_t range = m_high - m_low + 1;
-        const SymbolModel& s = model.getSymbolModel(symbol);
-        const uint64_t totalCount = model.getTotalCount();
-
-        m_high = m_low + (range * s.upperCount) / totalCount - 1;
-        m_low = m_low + (range * s.lowerCount) / totalCount;
-
-        // 2. Renormalize the interval and print out specific bits
-        renormalize(bit_writer);
-    }
-
-    void xArithmeticEncoderCore::finish(const tBitWriter & bit_writer)
-    {
-        // Output enough bits to uniquely define the final interval.
-        m_pending_bits++;
-        if (m_low < FIRST_QUARTER)
-        {
-            bit_writer(0);
-            for (; m_pending_bits > 0; m_pending_bits--) { bit_writer(1); }
-        }
-        else
-        {
-            bit_writer(1);
-            for (; m_pending_bits > 0; m_pending_bits--) { bit_writer(0); }
-        }
-    }
-
-    void xArithmeticEncoderCore::renormalize(const tBitWriter & bit_writer)
-    {
-        while (true)
-        {
-            // Case 1: The most significant bits of m_low and m_high are the same. Print the bit.
-            if ((m_low >> 63) == (m_high >> 63))
-            {
-                bool bit_to_write = m_low >> 63;
-                bit_writer(bit_to_write);
-                for (; m_pending_bits > 0; m_pending_bits--) { bit_writer(!bit_to_write); }
-                m_low <<= 1;
-                m_high = (m_high << 1) | 1;
-            }
-            // Case 2: Underflow. The interval straddles the middle.
-            else if ((m_low >= FIRST_QUARTER) && (m_high < THIRD_QUARTER))
-            {
-                m_pending_bits++;
-                m_low = (m_low - FIRST_QUARTER) * 2;
-                m_high = (m_high - FIRST_QUARTER) * 2 + 1;
-            }
-            // Case 3: The interval is wide enough. Stop renormalization.
-            else
-            {
-                break;
-            }
-        }
-    }*/
-
-    /* to be removed xContextModel::xContextModel(size_t num_contexts) : contexts(num_contexts) {
-        // The constructor initializes a vector of contexts of the specified size.
-        // Default values ​​(index=0, mps=false) are automatically set.
-    }
-
-    xContextModel::xContextModel(size_t num_contexts)
-        : contexts(num_contexts), qe_static_model(xQeModel::getInstance()) {
-    }
-
-    bool xContextModel::getMps(size_t context_index) const {
-        return contexts.at(context_index).mps;
-    }
-
-    uint8_t xContextModel::getStateIndex(size_t context_index) const {
-        return contexts.at(context_index).index;
-    }
-
-    uint16_t xContextModel::getQeValue(size_t context_index) const {
-        uint8_t current_state_index = contexts.at(context_index).index;
-        const auto& static_entry = qe_static_model.getEntry(current_state_index);
-        return static_entry.qe_value;
-    }
-
-    void xContextModel::updateForMps(size_t context_index) {
-        uint8_t old_index = contexts.at(context_index).index;
-        const auto& static_entry = qe_static_model.getEntry(old_index);
-
-        contexts.at(context_index).index = static_entry.next_index_mps; // For MPS path the symbol sense never changes
-    }
-
-    void xContextModel::updateForLps(size_t context_index) {
-        auto& current_context = contexts.at(context_index); // We are getting the reference because we will be modifying it
-        const auto& static_entry = qe_static_model.getEntry(current_context.index);
-
-        current_context.index = static_entry.next_index_lps; // We update the index
-
-        if (static_entry.switch_mps) {
-            current_context.mps = !current_context.mps; // If the static table dictates, we reverse the MPS sense
-        }
-    }*/
+    //=============================================================================================================================================================================
 
     xQeModel::xQeModel() : state_table(STATIC_STATE_TABLE) {}
 
@@ -471,266 +362,6 @@ namespace PMBB_NAMESPACE::JPEG {
         }
         return state_table[index];
     }
+         //=====================================================================================================================================================================================
+         //end of namespace PMBB::JPEG
 }
-    //=============================================================================================================================================================================
-    // xArithCommon
-    //=====================================================================================================================================================================================
-    /*bool xArithCommon::xInitArithTables(uint8* ArithLen, uint32* ArithCode, const xJFIF::xArithTable& ArithTable)
-    {
-        const xJFIF::xArithTable::tCodeL& TabCodeLengths = ArithTable.getCodeLengths();
-        const xJFIF::tByteV& TabCodeSymbols = ArithTable.getCodeSymbols();
-
-        uint32 TmpCode[257];
-        uint8  TmpLen[257];
-
-        //generate lengths
-        int32 NumLengths = xFillTmpLengths(TmpLen, TabCodeLengths);
-        if (NumLengths == NOT_VALID) { return false; }
-
-        //generate codes
-        bool Result = xFillTmpCodes(TmpCode, TmpLen, NumLengths);
-        if (!Result) { return false; }
-
-        //writeout
-        int32 TabLen = ArithTable.getClass() == xJFIF::xArithTable::eArithClass::DC ? 16 : 256;
-        memset(ArithLen, 0, TabLen * sizeof(uint8));
-        if (ArithCode != nullptr) { memset(ArithCode, 0, TabLen * sizeof(uint32)); }
-
-
-        int32 MaxSymbol = ArithTable.isDC() ? 15 : 255;
-        for (int32 p = 0; p < NumLengths; p++)
-        {
-            int32 idx = TabCodeSymbols[p];
-            if (idx < 0 || idx > MaxSymbol || ArithLen[idx]) { return false; }
-            ArithLen[idx] = TmpLen[p];
-            if (ArithCode != nullptr) { ArithCode[idx] = TmpCode[p]; }
-        }
-
-
-        return true;
-    }
-    int32 xArithCommon::xFillTmpLengths(uint8 * Lenghts, const xJFIF::xArithTable::tCodeL & TabCodeLengths)
-    {
-        int32 p = 0;
-        for (int32 l = 1; l <= 16; l++)
-        {
-            int32 i = TabCodeLengths[l - 1];
-            if (i < 0 || p + i > 256) { return NOT_VALID; }
-            while (i--) { Lenghts[p++] = (uint8)l; }
-        }
-        Lenghts[p] = 0;
-
-        return p;
-    }
-    int32 xArithCommon::xFillTmpCodes(uint32 * Codes, const uint8 * Lenghts, int32)//NumLengths)
-    {
-        uint32 Code = 0;
-        uint32 si = Lenghts[0];
-        int32  p = 0;
-        while (Lenghts[p])
-        {
-            while (Lenghts[p] == si)
-            {
-                Codes[p++] = Code;
-                Code++;
-            }
-            if (Code >= ((uint32)1 << si)) { return false; }
-            Code <<= 1;
-            si++;
-        }
-        return true;
-    }
-    void xArithCommon::xAvoidZeroLenCodes(uint8 * ArithLen, int32 TableSize)
-    {
-        for (int32 i = 0; i < TableSize; i++)
-        {
-            if (ArithLen[i] == 0) { ArithLen[i] = 16; }
-        }
-    }
-    */
-    //=============================================================================================================================================================================
-    // xArithDecoder
-    //=====================================================================================================================================================================================
-
-    /*void xArithDecoder::start(xBitstreamReader* bitstream)
-    {
-        m_bitstream = bitstream;
-        m_engine.start([this]() { return m_bitstream->readBit(); });
-    }
-
-    int64_t xArithDecoder::decode(const xArithmeticProbabilityModel & model)
-    {
-        return m_engine.decode(model, [this]() { return m_bitstream->readBit(); });
-    }
-
-    int64_t xArithDecoder::readSufix(xBitstreamReader * bitstream, int64_t numBits)
-    {
-        if (numBits == 0) { return 0; }
-        int64_t R = bitstream->readBits(numBits);
-        // This logic correctly converts the JPEG suffix to a signed value.
-        int64_t Value = R + (((R - (1 << (numBits - 1))) >> 31) & ((((uint64_t)-1) << numBits) + 1));
-        return Value;
-    }
-
-    int64_t xArithDecoder::readDC(xBitstreamReader * bitstream, const xArithmeticProbabilityModel & model)
-    {
-        // The decoded symbol represents the number of bits in the suffix.
-        int64_t numBits = decode(model);
-        return readSufix(bitstream, numBits);
-    }
-    */
-    //=============================================================================================================================================================================
-    // xArithDecoderCore
-    //=====================================================================================================================================================================================
-    /*
-    void xArithmeticDecoderCore::start(const tBitReader& bit_reader)
-    {
-        m_low = 0;
-        m_high = TOP_VALUE;
-
-        // Read the initial bits from the stream to fill the value buffer.
-        m_value = 0;
-        for (int i = 0; i < 64; ++i)
-        {
-            m_value = (m_value << 1) | bit_reader();
-        }
-    }
-
-    int64_t xArithmeticDecoderCore::decode(const xArithmeticProbabilityModel & model, const tBitReader & bit_reader)
-    {
-        // Step 1: Find the symbol
-        const uint64_t range = m_high - m_low + 1;
-        const uint64_t totalCount = model.getTotalCount();
-        const uint64_t scaled_value = ((m_value - m_low + 1) * totalCount - 1) / range;
-
-        int64_t symbol = model.findSymbol(scaled_value);
-        const SymbolModel& s = model.getSymbolModel(symbol);
-
-        // Step 2: Update the range
-        m_high = m_low + (range * s.upperCount) / totalCount - 1;
-        m_low = m_low + (range * s.lowerCount) / totalCount;
-
-        // Step 3: Renormalize
-        renormalize(bit_reader);
-
-        return symbol;
-    }
-
-    void xArithmeticDecoderCore::renormalize(const tBitReader & bit_reader)
-    {
-        while (true)
-        {
-            // Case 1: MSBs of low and high are the same. Shift them out.
-            if ((m_low >> 63) == (m_high >> 63))
-            {
-                m_low <<= 1;
-                m_high = (m_high << 1) | 1;
-                m_value = (m_value << 1) | bit_reader();
-            }
-            // Case 2: Underflow is possible. The range is straddling the midpoint.
-            else if ((m_low >= FIRST_QUARTER) && (m_high < THIRD_QUARTER))
-            {
-                m_low = (m_low - FIRST_QUARTER) * 2;
-                m_high = (m_high - FIRST_QUARTER) * 2 + 1;
-                m_value = (m_value - FIRST_QUARTER) * 2 | bit_reader();
-            }
-            // Case 3: Range is wide enough. Stop.
-            else
-            {
-                break;
-            }
-        }
-    }
-    */
-    //=============================================================================================================================================================================
-    // xArithEstimator
-    //=====================================================================================================================================================================================
-    /*
-    bool xArithEstimatorDC::init(const xJFIF::xArithTable & ArithTable)
-    {
-        if (ArithTable.getClass() != xJFIF::xArithTable::eArithClass::DC) { return false; }
-        bool InitCorrect = xInitArithTables(m_ArithLen, nullptr, ArithTable);
-        if (!InitCorrect) { return false; }
-        xAvoidZeroLenCodes(m_ArithLen, xJPEG_Constants::c_MaxNumCodeSymbolsDC);
-        return true;
-    }
-    bool xArithEstimatorAC::init(const xJFIF::xArithTable & ArithTable)
-    {
-        if (ArithTable.getClass() != xJFIF::xArithTable::eArithClass::AC) { return false; }
-        bool InitCorrect = xInitArithTables(m_ArithLen, nullptr, ArithTable);
-        if (!InitCorrect) { return false; }
-        xAvoidZeroLenCodes(m_ArithLen, xJPEG_Constants::c_MaxNumCodeSymbolsAC);
-        return true;
-    }
-    */
-    //=====================================================================================================================================================================================
-    // xArithmeticTabBuilder
-    //=====================================================================================================================================================================================
-    /*
-    void xArithmeticTabBuilder::buildLengthTable(uint8 * LengthTable, const uint32 * SymbolCount, int32 Size)
-    {
-        std::priority_queue<xArithTree*, std::vector<xArithTree*>, Comparator > ArithmeticTree;
-
-        //Before starting the procedure, the values of FREQ are collected for V = 0 to 255 and the FREQ value for V = 256 is set to 1 to reserve one code point
-        ArithmeticTree.push(new xArithTree((int16)Size, 1));
-        //insert values
-        for (int32 i = 0; i < Size; i++)
-        {
-            if (SymbolCount[i])
-            {
-                ArithmeticTree.push(new xArithTree((int16)(i), SymbolCount[i]));
-            }
-        }
-
-        //build Arithmetic tree
-        while (ArithmeticTree.size() > 1)
-        {
-            xArithTree* R = ArithmeticTree.top(); ArithmeticTree.pop();
-            xArithTree* L = ArithmeticTree.top(); ArithmeticTree.pop();
-            ArithmeticTree.push(new xArithTree(L, R));
-        }
-        xArithTree* Root = ArithmeticTree.top(); ArithmeticTree.pop();
-
-        //generate codes
-        memset(LengthTable, 0, Size + 1);
-        xCalcCodeLengths(LengthTable, Root, 0);
-        delete Root; Root = nullptr;
-    }
-
-    void xArithmeticTabBuilder::xCalcCodeLengths(uint8 * LengthTable, xArithTree * Node, int32 Length)
-    {
-        if (Node->m_Left == nullptr && Node->m_Right == nullptr)
-        {
-            int32 Symbol = Node->m_Symbol;
-            assert(Symbol >= 0 && Symbol <= (int32)std::numeric_limits<uint8>::max() + 1);
-            LengthTable[Symbol] = (uint8)Length;
-        }
-        else
-        {
-            xCalcCodeLengths(LengthTable, Node->m_Left, Length + 1);
-            xCalcCodeLengths(LengthTable, Node->m_Right, Length + 1);
-        }
-    }
-    flt64 xArithmeticTabBuilder::xCalcAvgCodeLength(const uint8 * CodeLength, const uint32 * SymbolCount, int32 Size)
-    {
-        int64 TotalCount = 0;
-        int64 TotalLength = 0;
-        for (int32 i = 0; i < Size; i++)
-        {
-            //assert((SymbolCount[i] == 0 && CodeLength[i] == 0) || (SymbolCount[i] != 0 && CodeLength[i] != 0));
-            TotalCount += SymbolCount[i];
-            TotalLength += (int64)SymbolCount[i] * (int64)CodeLength[i];
-        }
-        flt64 AvgCodeLength = (flt64)TotalLength / (flt64)TotalCount;
-
-        /** flt64 Entropy = 0;
-         * for(int32 i = 0; i < Size; i++)
-         * {
-         *   if(SymbolCount[i] > 0)
-         *   {
-         *     flt64 Probability = (flt64)SymbolCount[i] / (flt64)TotalCount;
-         *     Entropy -= Probability * (log(Probability) / log(2));
-         *   }
-         */
-//=====================================================================================================================================================================================
-//end of namespace PMBB::JPEG
