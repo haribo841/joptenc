@@ -183,6 +183,10 @@ namespace PMBB_NAMESPACE::JPEG {
             // Update model
             //CtxModel.updateMPS();
 
+            // This makes the C register behave as if the lower bound of the coding interval was shifted.
+            m_C += Qe;
+
+
             // Check if renormalization is needed
             if (m_A < 0x8000)
             {
@@ -192,7 +196,7 @@ namespace PMBB_NAMESPACE::JPEG {
                 {
                     // The MPS (m_A) interval is now smaller than the LPS (Qe) interval
                     // We need to add what we "took over" from LPS
-                    m_C += m_A;
+                    m_C = m_C - Qe + m_A; // Correct the tentative C update
                     m_A = Qe;
                 }
                 renormalize();
@@ -205,49 +209,21 @@ namespace PMBB_NAMESPACE::JPEG {
             m_A = Qe;   // Set the interval size to the LPS interval size
 
             // Update model
-            CtxModel.updateLPS();
+            //doubled update CtxModel.updateLPS();
 
             // Renormalization is always required after LPS
             renormalize();
         }
         CtxModel.update(is_mps); // All model updates moved to this line!
     }
-    /*    void xArithCoreEnc::encodeBinMP(uint8_t BinValue, xArithCoreModel& CtxModel)
-{
-    if (BinValue == CtxModel.getMPS())
-    {
-        m_A -= CtxModel.getQe();
-        m_C += CtxModel.getQe();
-
-        if (m_A < CtxModel.getQe())
-        {
-            // conditional exchange
-            uint16_t L = CtxModel.getQe();
-            CtxModel.updateLPS();
-            m_A = L;
-            m_C -= L;
-        }
-        else
-        {
-            CtxModel.updateMPS();
-        }
-    }
-    else // BinValue != CtxModel.getMPS()
-    {
-        m_A = CtxModel.getQe();
-        CtxModel.updateLPS();
-    }
-    renormalize();
-}
-    */
 
     void xArithCoreEnc::finish()
     {
         //FLUSH (D.1.4) from the JPEG standard.
-            //It ensures that all buffered information is saved correctly.
+        //It ensures that all buffered information is saved correctly.
 
-            // Step 1: We finalize the C register to point to the end of the last interval.
-            // We add (m_A - 1) to choose the highest possible value in the interval [C, C + A).
+        // Step 1: We finalize the C register to point to the end of the last interval.
+        // We add (m_A - 1) to choose the highest possible value in the interval [C, C + A).
         m_C = m_C + m_A - 1;
 
         // Step 2: We force the last two bytes from the C register to be written.
@@ -263,9 +239,9 @@ namespace PMBB_NAMESPACE::JPEG {
         // We write the first of the two final bytes.
         writeByte();
 
-        // We shift C again to prepare the second byte and write it.
-        m_C <<= 8;
-        m_CT = 0;
+        // We write the second final byte. The shift is now handled inside writeByte.
+        //m_C <<= 8;
+        //m_CT = 0;
         writeByte();
 
         // Step 3: We finalize the bitstream object itself (e.g. by writing the padding bits).
@@ -310,12 +286,16 @@ namespace PMBB_NAMESPACE::JPEG {
             // This is necessary because the previous byte was 0xFF.
             m_Bitstream.writeByte(0xFF);
             // The carry-over bit is now part of the new byte.
-            m_C = m_C & 0xFFFF; // Clear the higher bits
+            m_C &= 0xFFFF; // Clear the higher bits to handle the carry
         }
 
-        // Write the high byte of m_C to the bitstream.
+        // Write the high byte of the 16-bit window of m_C to the bitstream.
         m_Bitstream.writeByte(m_C >> 8);
-        m_C = m_C & 0xFF; // Keep the low byte for the next operation
+
+        // Shift the register left by 8 bits to move the next byte into position
+        // and mask to keep it within a 16-bit active window, which is a common
+        // implementation practice for this type of arithmetic coder.
+        m_C = (m_C << 8) & 0xFFFF;
 
         m_CT = 8; // Reset the bit counter for the new byte
     }

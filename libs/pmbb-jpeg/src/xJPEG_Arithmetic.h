@@ -107,7 +107,8 @@ namespace PMBB_NAMESPACE::JPEG {
         {
             m_A = 0x10000;
             m_C = 0;
-            m_CT = 12; // Standard-defined initialization for CT
+            m_CT = 12; // 4 "pause" bits + 8 data bits
+            m_ST = 0;
         }
 
         void encodeBinMP(uint32_t BinValue, xArithCoreModel& CtxModel); //Code_0(S) + Code_1(S) - Encodes a single binary symbol using the provided context model/index
@@ -121,7 +122,6 @@ namespace PMBB_NAMESPACE::JPEG {
 
     private:
         uint32_t m_ST;             // Byte being constructed for output
-        int32_t  m_CT;             // Bit counter for output byte
         int32_t  m_pending_bits;   // Count of pending bits to be written
         bool     m_bFF;            // Flag indicating if the last byte was 0xFF
         bool     m_bByteAvailable; // Flag indicating if a byte is available for output
@@ -130,6 +130,7 @@ namespace PMBB_NAMESPACE::JPEG {
         xBitstreamWriter& m_Bitstream;
         uint32_t m_A;
         uint32_t m_C;
+        int32_t  m_CT;             // Bit counter for output byte
         uint8_t m_BypassCount = 0;
         //xArithCoreModel m_CtxModel;
     };
