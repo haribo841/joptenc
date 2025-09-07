@@ -149,6 +149,18 @@ namespace PMBB_NAMESPACE::JPEG {
         return STATIC_STATE_TABLE[m_ProbIndex].m_Qe;
     }
 
+    void xArithCoreModel::update(bool is_mps)
+    {
+        if (is_mps)
+        {
+            updateMPS();
+        }
+        else
+        {
+            updateLPS();
+        }
+    }
+
     void xArithCoreModel::updateMPS() {
         m_ProbIndex = STATIC_STATE_TABLE[m_ProbIndex].m_nextMPS;
     }
@@ -163,161 +175,8 @@ namespace PMBB_NAMESPACE::JPEG {
     // context-index S is determined by the statistical model and is, in general, a function of the previous coding decisions
     // each value of S identifies a particular conditional probability estimate which is used in encoding the binary decision
 //=====================================================================================================================================================================================
-// layer 1 - arithmetic codec core - Annex D
-    void xArithCoreEnc::encodeBinMP(uint32_t BinValue, xArithCoreModel& CtxModel) {
-
-        // Get MPS and Qe (LPS probability)
-        uint8_t  ProbIndex = CtxModel.getProbIndex();
-        uint8_t  MPS = CtxModel.getMPS();
-        const auto& QeEntry = xQeModel::getInstance().getEntry(ProbIndex);
-        uint16_t Qe = QeEntry.m_Qe; //qe_value;
-
-        // Update interval A with the LPS probability
-        m_A -= Qe;
-
-        // Decide whether the encoded symbol is MPS or LPS
-        bool is_mps = (BinValue == MPS);
-
-        if (is_mps)//BinValue == MPS)
-        {
-            // Update model
-            //CtxModel.updateMPS();
-
-            // This makes the C register behave as if the lower bound of the coding interval was shifted.
-            m_C += Qe;
-
-
-            // Check if renormalization is needed
-            if (m_A < 0x8000)
-            {
-                // If the range for MPS is less than 0x8000,
-                // the range for LPS (Qe) was large, so there may be a change
-                if (m_A < Qe)
-                {
-                    // The MPS (m_A) interval is now smaller than the LPS (Qe) interval
-                    // We need to add what we "took over" from LPS
-                    m_C = m_C - Qe + m_A; // Correct the tentative C update
-                    m_A = Qe;
-                }
-                renormalize();
-            }
-        }
-        else
-        {
-            // Set the interval A to Qe and move the lower limit C
-            m_C += m_A; // Move the lower bound by the size of the MPS interval
-            m_A = Qe;   // Set the interval size to the LPS interval size
-
-            // Update model
-            //doubled update CtxModel.updateLPS();
-
-            // Renormalization is always required after LPS
-            renormalize();
-        }
-        CtxModel.update(is_mps); // All model updates moved to this line!
-    }
-
-    void xArithCoreEnc::finish()
-    {
-        //FLUSH (D.1.4) from the JPEG standard.
-        //It ensures that all buffered information is saved correctly.
-
-        // Step 1: We finalize the C register to point to the end of the last interval.
-        // We add (m_A - 1) to choose the highest possible value in the interval [C, C + A).
-        m_C = m_C + m_A - 1;
-
-        // Step 2: We force the last two bytes from the C register to be written.
-        // We use the existing mechanism with the m_CT counter and the writeByte() function,
-        // to properly handle bit buffering and inserting "stuffing" bits after 0xFF.
-
-        // We shift bits in register C to prepare them for writing.
-        // The number of shifts depends on how many bits are already left in the buffer (m_CT).
-        if (m_CT <= 0) { m_CT = 8; } // We reset the counter if it is already zero.
-        m_C <<= (8 - m_CT);
-        m_CT = 0; // We mark the bit buffer as ready for writing.
-
-        // We write the first of the two final bytes.
-        writeByte();
-
-        // We write the second final byte. The shift is now handled inside writeByte.
-        //m_C <<= 8;
-        //m_CT = 0;
-        writeByte();
-
-        // Step 3: We finalize the bitstream object itself (e.g. by writing the padding bits).
-        m_Bitstream.flushToBuffer();
-    }
-
-    void xArithCoreEnc::renormalize()
-    {
-        do {
-            m_A <<= 1;  // Double the compartment size
-            m_C <<= 1;  // Move lower border left
-
-            m_CT--;     // Decrement bit counter to fill byte
-            if (m_CT == 0)
-            {
-                // When the counter reaches zero, we need to write a byte
-                writeByte(); // This function handles bit buffering and output.
-            }
-
-        } while (m_A < 0x8000); // Repeat until A is large enough
-        /*while (m_A < 0x8000)
-        {
-            if (m_C & 0x8000)
-            {
-                m_C |= 0xFFFE;
-            }
-            else
-            {
-                m_C &= 0x7FFF;
-            }
-            m_A <<= 1;
-            m_C <<= 1;
-            m_BypassCount = 0;
-            m_Bitstream.write(m_C);
-        }*/
-    }
-
-    void xArithCoreEnc::writeByte() {
-        // Check for a pending carry bit from the previous operation.
-        if (m_C > 0xFFFF) {
-            // If there is a carry, write 0xFF to the bitstream.
-            // This is necessary because the previous byte was 0xFF.
-            m_Bitstream.writeByte(0xFF);
-            // The carry-over bit is now part of the new byte.
-            m_C &= 0xFFFF; // Clear the higher bits to handle the carry
-        }
-
-        // Write the high byte of the 16-bit window of m_C to the bitstream.
-        m_Bitstream.writeByte(m_C >> 8);
-
-        // Shift the register left by 8 bits to move the next byte into position
-        // and mask to keep it within a 16-bit active window, which is a common
-        // implementation practice for this type of arithmetic coder.
-        m_C = (m_C << 8) & 0xFFFF;
-
-        m_CT = 8; // Reset the bit counter for the new byte
-    }
-
-    void xArithCoreModel::update(bool is_mps)
-    {
-        const auto& entry = xQeModel::getInstance().getEntry(m_ProbIndex);
-        if (is_mps)
-        {
-            m_ProbIndex = entry.m_nextMPS;
-        }
-        else
-        {
-            m_ProbIndex = entry.m_nextLPS;
-            if (entry.m_switchMPS)
-            {
-                m_MPS ^= 1; // Toggle MPS sense
-            }
-        }
-    }
-
-    //=============================================================================================================================================================================
+// layer 1 - arithmetic codec core - Annex D        
+//=============================================================================================================================================================================
 
     void xArithCoreDec::start(std::function<bool(void)> const& callback) {
         // TODO: implementation
@@ -327,7 +186,7 @@ namespace PMBB_NAMESPACE::JPEG {
         return 0;
     }
 
-    //=============================================================================================================================================================================
+//=============================================================================================================================================================================
 
     xQeModel::xQeModel() : state_table(STATIC_STATE_TABLE) {}
 
@@ -342,6 +201,6 @@ namespace PMBB_NAMESPACE::JPEG {
         }
         return state_table[index];
     }
-         //=====================================================================================================================================================================================
-         //end of namespace PMBB::JPEG
+//=====================================================================================================================================================================================
+//end of namespace PMBB::JPEG
 }

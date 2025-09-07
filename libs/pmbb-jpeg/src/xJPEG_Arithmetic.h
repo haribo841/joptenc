@@ -83,7 +83,7 @@ namespace PMBB_NAMESPACE::JPEG {
     {
     private:
         xByteBuffer* m_ByteBuffer = nullptr; // it should be a pointer
-        // MSB                                LSB
+                                    // MSB                                LSB
         uint64_t m_A;               // 00000000, 00000000, aaaaaaaa, aaaaaaaa
         uint64_t m_C;               // 0000cbbb, bbbbbsss, xxxxxxxx, xxxxxxxx
         // a - fractional bits in the A-register (the current probability interval value)
@@ -99,41 +99,158 @@ namespace PMBB_NAMESPACE::JPEG {
 
     //=====================================================================================================================================================================================
 
-    class xArithCoreEnc : public xArithCoreCommon
+    template <class T_Bitstream>
+    class xArithCoreEncT : public xArithCoreCommon
     {
     public:
-        xArithCoreEnc(xBitstreamWriter& bitstream) : m_Bitstream(bitstream), m_ST(0), m_CT(0), m_pending_bits(0), m_bFF(false), m_bByteAvailable(false), m_A(0), m_C(0) {}
+        xArithCoreEncT(T_Bitstream& bitstream) : m_Bitstream(bitstream), m_ST(0), m_CT(0), m_pending_bytes(0), m_A(0), m_C(0) {}
         void initialize()
         {
             m_A = 0x10000;
             m_C = 0;
-            m_CT = 12; // 4 "pause" bits + 8 data bits
+            m_CT = 11; // 11 bits are available in the buffer before the first byte is full.
             m_ST = 0;
+            m_pending_bytes = 0;
         }
 
-        void encodeBinMP(uint32_t BinValue, xArithCoreModel& CtxModel); //Code_0(S) + Code_1(S) - Encodes a single binary symbol using the provided context model/index
-        //S is a context-index which identifies a particular conditional probability estimate used in coding the binary decision
-        void finish();// const std::function<void(bool)>& bit_writer); // Finalizes the encoding process by writing the remaining bits - "Flush"
-        void renormalize(); // Renormalizes the interval and outputs any determined bits
-		void writeByte(); // Writes a byte to the bitstream, handling special cases like 0xFF
+        void encodeBinMP(uint32_t BinValue, xArithCoreModel& CtxModel) //Code_0(S) + Code_1(S) - Encodes a single binary symbol using the provided context model/index
+            //S is a context-index which identifies a particular conditional probability estimate used in coding the binary decision
+        {
+            // Get MPS and Qe (LPS probability)
+            uint8_t  ProbIndex = CtxModel.getProbIndex();
+            uint8_t  MPS = CtxModel.getMPS();
+            const auto& QeEntry = xQeModel::getInstance().getEntry(ProbIndex);
+            uint16_t Qe = QeEntry.m_Qe; //qe_value;
+
+            // Calculating the subinterval size for MPS
+            uint32_t AMps = m_A - Qe;
+
+            // Decide whether the encoded symbol is MPS or LPS
+            bool is_mps = (BinValue == MPS);
+
+            if (is_mps) // MPS Path
+            {
+                // Checking the condition of a conditional exchange
+                if (m_A < Qe || AMps < Qe)
+                {
+                    // Conditional exchange (LPS and MPS switch roles)
+                    // This path is identical to the LPS encoding
+                    m_C += AMps;
+                    m_A = Qe;
+                    //renormalize();
+                }
+                else
+                {
+                    // Standard MPS encoding
+                    // The bug was here. In this arithmetic coding variant,
+                    // the MPS occupies the upper sub-interval. Therefore, C must be
+                    // advanced past the lower (LPS) sub-interval.
+                    m_A = AMps;
+                    //m_C += Qe; Normal MPS path with subsequent renormalization correctly expects the code register C to remain unchanged
+                }
+            }
+            else // LPS Path
+            {
+                // The lower limit of C is shifted by the size of the MPS interval
+                m_C += AMps;
+                // The size of the A interval becomes the size of the LPS interval
+                m_A = Qe;
+                // Renormalization is always required after LPS
+                //renormalize();
+            }
+            if (m_A < 0x8000)
+            {
+                renormalize();
+            }
+
+            // Updating the statistical model after symbol encoding
+            CtxModel.update(is_mps);
+        }
+        void finish()// const std::function<void(bool)>& bit_writer); // Finalizes the encoding process by writing the remaining bits - "Flush"
+        {
+            uint32_t TempC = m_C + m_A;
+            m_C |= 0xFFFFF;
+            if (TempC < m_C)
+            {
+                m_ST++;
+            }
+
+            if (m_pending_bytes > 0)
+            {
+                m_Bitstream.writeByte(m_ST);
+                for (int i = 0; i < m_pending_bytes; ++i)
+                {
+                    m_Bitstream.writeByte(0xFF);
+                }
+            }
+            else {
+                m_Bitstream.writeByte(m_ST);
+            }
+
+            m_Bitstream.writeByte((m_C >> 12) & 0xFF);
+            m_Bitstream.writeByte((m_C >> 4) & 0xFF);
+
+            m_Bitstream.flushToBuffer();
+        }
+
+        void renormalize() // Renormalizes the interval and outputs any determined bits
+        {
+            do {
+                m_A <<= 1;  // Double the compartment size
+                m_C <<= 1;  // Move lower border left
+                m_CT--;     // Decrement bit counter to fill byte
+                if (m_CT == 0)
+                {
+                    // When the counter reaches zero, we need to write a byte
+                    writeByte(); // This function handles bit buffering and output.
+                }
+
+            } while (m_A < 0x8000); // Repeat until A is large enough
+        }
+
+        void writeByte() // Writes a byte to the bitstream, handling special cases like 0xFF
+        {
+            if (m_ST == 0xFF)
+            {
+                m_pending_bytes++;
+                m_ST = (m_C >> 20) & 0xFF;
+                m_C &= 0xFFFFF;
+                m_CT = 7;
+            }
+            else
+            {
+                if (m_pending_bytes > 0)
+                {
+                    m_Bitstream.writeByte(m_ST);
+                    for (int i = 0; i < m_pending_bytes; ++i)
+                    {
+                        m_Bitstream.writeByte(0xFF);
+                    }
+                    m_pending_bytes = 0;
+                }
+                m_ST = (m_C >> 20) & 0xFF;
+                m_C &= 0xFFFFF;
+                m_CT = 7;
+            }
+        }
 
         uint32_t getA() const { return m_A; }
         uint32_t getC() const { return m_C; }
 
-    private:
-        uint32_t m_ST;             // Byte being constructed for output
-        int32_t  m_pending_bits;   // Count of pending bits to be written
-        bool     m_bFF;            // Flag indicating if the last byte was 0xFF
-        bool     m_bByteAvailable; // Flag indicating if a byte is available for output
-
     protected:
-        xBitstreamWriter& m_Bitstream;
+        T_Bitstream& m_Bitstream;
         uint32_t m_A;
         uint32_t m_C;
         int32_t  m_CT;             // Bit counter for output byte
+        uint32_t m_ST;             // Byte being constructed for output
+        int32_t  m_pending_bytes;   // Count of pending bits to be written
+        //bool     m_bFF;            // Flag indicating if the last byte was 0xFF
+        //bool     m_bByteAvailable; // Flag indicating if a byte is available for output
         uint8_t m_BypassCount = 0;
-        //xArithCoreModel m_CtxModel;
     };
+
+    // Alias ​​for backward compatibility in the rest of the code
+    using xArithCoreEnc = xArithCoreEncT<xBitstreamWriter>;
 
     //=====================================================================================================================================================================================
     class xArithCoreDec : public xArithCoreCommon
