@@ -55,22 +55,6 @@ namespace PMBB_NAMESPACE::JPEG {
         // Methods for updating the model that now only accept a symbol(LPS or MPS)
         void update(bool is_mps);
 
-            /* void updateMPS()
-            {
-                const auto& entry = xQeModel::getInstance().getEntry(m_ProbIndex);
-                m_ProbIndex = entry.next_index_mps;
-                // MPS sense does not change on MPS path
-            }
-
-            void updateLPS()
-            {
-                const auto& entry = xQeModel::getInstance().getEntry(m_ProbIndex);
-                m_ProbIndex = entry.next_index_lps;
-                if (entry.switch_mps)
-                {
-                    m_MPS ^= 1; // Toggle MPS sense
-                }*/
-
     private:
         uint8_t m_ProbIndex; // Current index in the probability table
         uint8_t m_MPS;      // Current Most Probable Symbol (MPS) sense (0 or 1)
@@ -79,19 +63,30 @@ namespace PMBB_NAMESPACE::JPEG {
     //=====================================================================================================================================================================================
     // layer 1 - arithmetic codec core - Annex D
 
+    // Static accessor for Qe values, matching the legacy c_Qe[] interface
     class xArithCoreCommon
     {
-    private:
+    public:
+        // Legacy Qe table for compatibility with code expecting c_Qe
+        static const std::array<uint32_t, 113> c_Qe;
+
+        uint32_t getA() const { return m_A; }
+        uint32_t getC() const { return m_C; }
+        int32_t  getCT() const { return m_CT; }
+        uint32_t getST() const { return m_ST; }
+
+    protected:
         xByteBuffer* m_ByteBuffer = nullptr; // it should be a pointer
-                                    // MSB                                LSB
-        uint64_t m_A;               // 00000000, 00000000, aaaaaaaa, aaaaaaaa
-        uint64_t m_C;               // 0000cbbb, bbbbbsss, xxxxxxxx, xxxxxxxx
+        // MSB                                LSB
+        uint32_t m_A;               // 00000000, 00000000, aaaaaaaa, aaaaaaaa
+        uint32_t m_C;               // 0000cbbb, bbbbbsss, xxxxxxxx, xxxxxxxx
         // a - fractional bits in the A-register (the current probability interval value)
         // b - indicate the bit positions from which the completed bytes of data are removed from the C-register
         // c - carry bit
         // s - optional spacer bits which provide useful constraints on carry-over
         // x - fractional bits in the code register
-
+        int32_t  m_CT;             // Bit counter for output byte
+        uint32_t m_ST;             // Byte being constructed for output
         //any register conventions which allow resolution of carry-over in the encoder and which produce the same entropy-coded segment may be used
 
         //Except at the time of initialization, bit 15 of the A - register is always set and bit 16 is always clear(the LSB is bit 0).
@@ -103,7 +98,14 @@ namespace PMBB_NAMESPACE::JPEG {
     class xArithCoreEncT : public xArithCoreCommon
     {
     public:
-        xArithCoreEncT(T_Bitstream& bitstream) : m_Bitstream(bitstream), m_ST(0), m_CT(0), m_pending_bytes(0), m_A(0), m_C(0) {}
+        xArithCoreEncT(T_Bitstream& bitstream) : m_Bitstream(bitstream), m_pending_bytes(0)
+            {
+                m_A  = 0;
+                m_C  = 0;
+                m_CT = 0;
+                m_ST = 0;
+            }
+
         void initialize()
         {
             m_A = 0x10000;
@@ -137,7 +139,6 @@ namespace PMBB_NAMESPACE::JPEG {
                     // This path is identical to the LPS encoding
                     m_C += AMps;
                     m_A = Qe;
-                    //renormalize();
                 }
                 else
                 {
@@ -146,7 +147,6 @@ namespace PMBB_NAMESPACE::JPEG {
                     // the MPS occupies the upper sub-interval. Therefore, C must be
                     // advanced past the lower (LPS) sub-interval.
                     m_A = AMps;
-                    //m_C += Qe; Normal MPS path with subsequent renormalization correctly expects the code register C to remain unchanged
                 }
             }
             else // LPS Path
@@ -155,8 +155,6 @@ namespace PMBB_NAMESPACE::JPEG {
                 m_C += AMps;
                 // The size of the A interval becomes the size of the LPS interval
                 m_A = Qe;
-                // Renormalization is always required after LPS
-                //renormalize();
             }
             if (m_A < 0x8000)
             {
@@ -166,7 +164,8 @@ namespace PMBB_NAMESPACE::JPEG {
             // Updating the statistical model after symbol encoding
             CtxModel.update(is_mps);
         }
-        void finish()// const std::function<void(bool)>& bit_writer); // Finalizes the encoding process by writing the remaining bits - "Flush"
+
+        void finish() // Finalizes the encoding process by writing the remaining bits - "Flush"
         {
             uint32_t TempC = m_C + m_A;
             m_C |= 0xFFFFF;
@@ -234,18 +233,13 @@ namespace PMBB_NAMESPACE::JPEG {
             }
         }
 
-        uint32_t getA() const { return m_A; }
-        uint32_t getC() const { return m_C; }
+        void setByteBuffer(xByteBuffer* buffer) {
+            m_Bitstream.bindByteBuffer(buffer);
+        }
 
     protected:
         T_Bitstream& m_Bitstream;
-        uint32_t m_A;
-        uint32_t m_C;
-        int32_t  m_CT;             // Bit counter for output byte
-        uint32_t m_ST;             // Byte being constructed for output
         int32_t  m_pending_bytes;   // Count of pending bits to be written
-        //bool     m_bFF;            // Flag indicating if the last byte was 0xFF
-        //bool     m_bByteAvailable; // Flag indicating if a byte is available for output
         uint8_t m_BypassCount = 0;
     };
 
@@ -257,13 +251,12 @@ namespace PMBB_NAMESPACE::JPEG {
 	{
     public:
         //xArithmeticDecoder(xBitstreamReader& bitstream) : m_Bitstream(bitstream) {}
-
+        void start();
 		void start(const std::function<bool()>& bit_reader); // Initializes the decoder state
 		uint32_t decodeBinMP(const xArithCoreModel& Model); // Decodes a single binary symbol using the provided context model
-
+        void setByteBuffer(xByteBuffer* buffer);
+        void finish();
 	private:
-		uint32_t m_ST; // Current byte being processed
-		int32_t  m_CT; // Bit counter for the current byte
 		uint32_t m_value; // Current value from the input stream
 		bool     m_bFF; // Flag indicating if the last byte was 0xFF
         bool     m_bByteAvailable; // Flag indicating if a byte is available for input
