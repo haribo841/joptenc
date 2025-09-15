@@ -295,61 +295,6 @@ static const std::array<tTraceEntry, 257> EncoderTrace =
           { UND, UND, 0, UND, 0x81DA, 0x007ADB2C,  4, 0, }, //post flush
         } };
 
-        void logState(const std::string& label, int iteration, const xArithCoreModel& model, const xArithCoreEnc& enc, const tTraceEntry& expected_state)
-        {
-            // Getting current values ​​from the encoder and model
-            uint32_t actual_A = enc.getA();
-            uint32_t actual_C = enc.getC();
-            // Getting the current status INDEX
-            uint8_t  actual_pIndex = model.getProbIndex();
-            // Use the index to read the ACTUAL ST value for this state from the table
-            uint8_t  actual_ST_value = EncoderTrace[actual_pIndex].ST;
-            // Get expected value of ST (no change)
-            uint8_t  expected_ST_value = expected_state.ST;
-            uint8_t  actual_MPS = model.getMPS();
-            uint8_t  expected_MPS = expected_state.MPS;
-            // Using named structure fields for greater readability and correctness
-            uint32_t expected_A = expected_state.A;
-            uint32_t expected_C = expected_state.C;
-
-            // Using std::cout for HEX formatted output
-            std::cout << std::uppercase << std::setfill('0');
-            std::cout << "--- " << label << " (iteration: " << std::dec << iteration << ") ---\n";
-
-            // Check and print A
-            std::cout << "  Reg A: " << std::dec << actual_A << "(0x" << std::hex << std::setw(4) << actual_A << ")"
-                << " | Expected: " << std::dec << expected_A << "(0x" << std::hex << std::setw(4) << expected_A << ")";
-            if ((actual_A & 0xFFFF) != expected_A) std::cout << "  <-- INCOMPATIBILITY!";
-            std::cout << "\n";
-
-            // Check and print C
-            std::cout << "  Reg C: " << std::dec << actual_C << "(0x" << std::hex << std::setw(8) << actual_C << ")"
-                << " | Expected: " << std::dec << expected_C << "(0x" << std::hex << std::setw(8) << expected_C << ")";
-            if (actual_C != expected_C) std::cout << "  <-- INCOMPATIBILITY!";
-            std::cout << "\n";
-
-            // Check and print ST (ProbIndex)
-            std::cout << "  ST Idx: " << std::dec << (int)actual_pIndex
-                << " | ST Val: " << (int)actual_ST_value
-                << "(0x" << std::hex << std::setw(2) << (int)actual_ST_value << ")"
-                << " | Expected ST Val: " << std::dec << (int)expected_ST_value
-                << "(0x" << std::hex << std::setw(2) << (int)expected_ST_value << ")";
-            if (actual_ST_value != expected_ST_value) std::cout << "  <-- INCOMPATIBILITY!";
-            std::cout << "\n";
-
-            // Check and print MPS
-            std::cout << "  MPS: " << std::dec << (int)actual_MPS << "(0x" << std::hex << (int)actual_MPS << ")"
-                << " | Expected: " << std::dec << (int)expected_MPS << "(0x" << std::hex << (int)expected_MPS << ")";
-            if (actual_MPS != expected_MPS) std::cout << "  <-- INCOMPATIBILITY!";
-            std::cout << "\n";
-
-            // Check if any error occurred and add a summary
-            if ((actual_A & 0xFFFF) != expected_A || actual_C != expected_C || actual_ST_value != expected_ST_value || actual_MPS != expected_MPS)
-            {
-                std::cout << "==> ENCODER STATUS ERROR DETECTED! <==\n";
-            }
-        }
-
 #ifndef PMBB_JPEG_ARITHM_AVOID_MARKER_EMULATION
 #define PMBB_JPEG_ARITHM_AVOID_MARKER_EMULATION 1
 #endif
@@ -383,7 +328,7 @@ void checkEncoder(const xArithCoreModel& Model, const xArithCoreEnc& Enc, const 
 
     // Validation of the A value
     bool CorrectA = TstA <= 0x10000 && TstA > 0x7FFF;
-    //CHECK(CorrectA);
+    CHECK(CorrectA);
 
     // Mask for A because the test vector only stores 16 bits
     TstA = TstA & 0xFFFF;
@@ -407,10 +352,6 @@ void testEnc()
     xArithCoreEnc Enc(Writer);
     Enc.initialize();
 
-    // Initial State Logging (optional but helpful)
-    std::cout << ">>> Starting the encoder test <<<\n";
-    logState("Initial state", -1, Model, Enc, EncoderTrace[0]);
-
     for (int32 i = 0; i < EncoderTrace.size() - 1; i++)
     {
         // This function checks the state BEFORE encoding and throws an exception on error
@@ -421,17 +362,10 @@ void testEnc()
 
         // An encoding operation that changes the internal state of the Model and Enc
         Enc.encodeBinMP(D, Model);
-
-        // We check the encoder state AFTER the operation, comparing it with the NEXT expected state from the table.
-        logState("Status after bit encoding", i, Model, Enc, EncoderTrace[i + 1]);
     }
-
 
     // Final check of the final state (before calling finish())
     checkEncoder(Model, Enc, EncoderTrace.back());
-
-    // Optional end-state logging
-    logState("Final state", EncoderTrace.size() - 2, Model, Enc, EncoderTrace.back());
 
     Enc.finish();
 

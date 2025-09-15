@@ -51,8 +51,6 @@ namespace PMBB_NAMESPACE::JPEG {
         uint8_t getMPS() const { return m_MPS; }
         uint16_t getQe() const;
         void flipMPS() { m_MPS = 1 - m_MPS; }
-        //void updateMPS();
-        //void updateLPS();
 
         // Methods for updating the model that now only accept a symbol(LPS or MPS)
         void update(bool is_mps);
@@ -117,6 +115,7 @@ namespace PMBB_NAMESPACE::JPEG {
             m_CT = 11;
             m_ST = 0;
             m_B = 0;
+            m_isFirstByte = true;
             m_renormalization_occurred = false;
         }
 
@@ -139,10 +138,6 @@ namespace PMBB_NAMESPACE::JPEG {
                     if (m_A < Qe)
                     {
                         m_C += m_A;
-                        if ((m_C >> 24) != 0) {
-                            printf("[ASSERT-WARN] large high bits in C after update: C=0x%08X (A=0x%04X Qe=0x%04X)\n",
-                                m_C, m_A, Qe);
-                        }
                         m_A = Qe;
                     }
                     else
@@ -163,10 +158,6 @@ namespace PMBB_NAMESPACE::JPEG {
                 }
                 doRenormalization = true;
                 modelUpdate = true;
-                if ((m_C >> 24) != 0) { // adjust threshold if you want earlier detection
-                    printf("[ASSERT-WARN] large high bits in C after update: C=0x%08X (A=0x%04X Qe=0x%04X)\n",
-                        m_C, m_A, Qe);
-                }
             }
             if (modelUpdate) {
                 if (!is_mps) // True LPS
@@ -214,63 +205,80 @@ namespace PMBB_NAMESPACE::JPEG {
 
             m_renormalization_occurred = true;
             do {
-                uint32_t beforeC = m_C;
-                uint32_t beforeA = m_A;
-                printf("[ENC-UPD] iter=%d beforeC=0x%08X A=0x%04X Qe=0x%04X afterC=0x%08X\n",
-                    current_iter, beforeC, beforeA, m_C);
-                if ((m_C >> 20) != 0) {
-                    printf("[WARN] high bits in C: C=0x%08X T=%u at iter=%d\n", m_C, (m_C >> 20), current_iter);
-                }
                 m_A <<= 1;  // Double the compartment size
                 m_C <<= 1;  // Move lower border left
                 m_CT--;     // Decrement bit counter to fill byte
-                printf("[RENORM] iter=%d shift#=%d A=0x%04X C=0x%08X CT=%d\n", current_iter, shifts, m_A, m_C, m_CT);
                 if (m_CT == 0)
                 {
-                    // When the counter reaches zero, we need to write a byte
-                    writeByte(); // This function handles bit buffering and output.
+					Byte_out(); // Output a byte if the counter is zero
                     m_CT = 8;
                 }
                 current_iter++;
             } while (m_A < 0x8000); // Repeat until A is large enough
         }
 
-        void writeByte()
+        void Byte_out() // Replaces writeByte()
         {
             uint32_t T = (m_C >> 19);
-			static int current_iter = 0; 
-            printf("[BYTE_OUT] iter=%d T=%u m_B(before)=0x%02X m_ST=%d -> branch=%s\n",
-                current_iter, T, m_B, m_ST, (T > 0xFF ? "carry" : ((T & 0xFF) == 0xFF ? "stack" : "normal")));
-            if (T > 0xFF)
+
+            // Step 2: T > X'FF' ? -> Checking if a carry has occurred.
+            if (T > 0xFF)// Carry-over occurred
             {
-                uint8_t oldB = m_B;
-                uint8_t newB = static_cast<uint8_t>(oldB + 1); // increment (may wrap)
-                if (oldB == 0xFF) 
+                // On carry, the first byte logic is simpler as we are forced to output.
+                // We assume carry on the very first byte is an unlikely edge case.
+                m_B++; // B = B + 1
+
+                // Store the previous byte and handle Stuff_0 if B becomes 0xFF.
+                m_Bitstream.writeByte(m_B);
+                if (m_B == 0xFF)
                 {
+                    m_Bitstream.writeByte(0x00); // Stuff_0
                 }
-                for (int i = 0; i < m_ST; ++i) 
+
+                // Output_stacked_zeros: write as many zeros as there were stacked 0xFF.
+                for (uint32_t i = 0; i < m_ST; ++i)
                 {
+                    m_Bitstream.writeByte(0x00);
                 }
                 m_ST = 0;
-                // Update B for next iteration
-                m_B = static_cast<uint8_t>(T & 0xFF);
-            }
-            else if ((T & 0xFF) == 0xFF)
-            {
-                m_ST++;
-            }
 
-            else
+                // Update B for the next call, ignoring the carry bit.
+                m_B = static_cast<uint8_t>(T & 0xFF);
+                m_isFirstByte = false; // A byte has now been processed
+            }
+            else // --- Path "No" (no carry) ---
             {
-                if (m_ST > 0)
+                // Step 3: T = X'FF' ?
+                if ((T & 0xFF) == 0xFF)
                 {
-                    for (int i = 0; i < m_ST; ++i)
+                    // --- Path "Yes" (byte is 0xFF) ---
+                    m_ST++; // ST = ST + 1: push a byte onto the stack.
+                }
+                else
+                {
+                    // --- Path "No" (plain byte) ---
+                    //Write the previous byte only if this is not the first call.
+                        if (!m_isFirstByte)
+                        {
+                            m_Bitstream.writeByte(m_B);
+                            if (m_B == 0xFF) // Stuff_0 support for B itself.
+                            {
+                                m_Bitstream.writeByte(0x00);
+                            }
+                        }
+
+                    // Write all set aside bytes 0xFF, each with a required zero (Stuff_0).
+                    for (uint32_t i = 0; i < m_ST; ++i)
                     {
+                        m_Bitstream.writeByte(0xFF);
+                        m_Bitstream.writeByte(0x00);
                     }
                     m_ST = 0;
-                }
 
-                m_B = static_cast<uint8_t>(T & 0xFF);
+                    // Update B for the next call.
+                    m_B = static_cast<uint8_t>(T & 0xFF);
+                    m_isFirstByte = false; // The first real byte is now pending in m_B
+                }
             }
             m_C &= 0x7FFFF;
         }
@@ -342,13 +350,14 @@ namespace PMBB_NAMESPACE::JPEG {
             m_C <<= m_CT;
 
             // Step 3: Call the Byte_out procedure
-            writeByte();
+            Byte_out();
 
             // Step 4: Shift register C left by 8 bits (C = SLL C 8)
             m_C <<= 8;
 
+
             // Step 5: Call Byte_out and Discard_final_zeros
-            writeByte();
+            Byte_out();
             discard_final_zeros();
 
             // Make sure all data from the writer's temporary buffer has been written
@@ -359,6 +368,7 @@ namespace PMBB_NAMESPACE::JPEG {
     protected:
         T_Bitstream& m_Bitstream;
         uint8_t  m_B; // Previous byte
+        bool     m_isFirstByte;
         uint8_t m_BypassCount = 0;
         bool m_renormalization_occurred;
         // Safe arithmetic helper: computes C + A - Qe using a 64-bit intermediate
@@ -413,14 +423,12 @@ namespace PMBB_NAMESPACE::JPEG {
         static constexpr size_t getNumStates() { return NUM_STATES; }
 
         /**
-      * @brief Zwraca wartość Qe dla danego indeksu stanu.
-      * Definicja funkcji znajduje się BEZPOŚREDNIO tutaj, w pliku nagłówkowym,
-      * co jest wymagane dla funkcji inline.
-      */
+        * @brief zwraca wartość Qe dla danego indeksu stanu.
+        * Definicja funkcji znajdującej się BEZPOŚREDNIO tutaj, w pliku nagłówkowym,
+        * jest wymagane dla funkcji inline.
+        */
         static inline uint16_t getQeValue(uint8_t stateIndex)
         {
-            // Upewnij się, że STATIC_STATE_TABLE jest widoczna tutaj.
-            // Zazwyczaj jest zdefiniowana jako prywatna statyczna stała w tej samej klasie.
             return xQeModel::STATIC_STATE_TABLE[stateIndex].m_Qe;
         }
         static constexpr size_t NUM_STATES = 113;
