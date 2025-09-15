@@ -25,10 +25,10 @@ namespace PMBB_NAMESPACE::JPEG {
         return bitVector;
     }
     // Table D.3 – Qe values and probability estimation state machine
-    const std::array<StateEntry, xQeModel::getNumStates()> STATIC_STATE_TABLE =
+    const std::array<StateEntry, xQeModel::getNumStates()> xQeModel::STATIC_STATE_TABLE =
     {
         {
-            // Index,  Qe_Value, Next_LPS, Next_MPS, Switch_MPS
+            // Qe_Value, Next_LPS, Next_MPS, Switch_MPS, Index
             {0x5A1D, 1, 1, true},      // 0
             {0x2586, 14, 2, false},    // 1
             {0x1114, 16, 3, false},    // 2
@@ -145,147 +145,29 @@ namespace PMBB_NAMESPACE::JPEG {
         }
     };
 
-    const std::array<uint32_t, 113> xArithCoreCommon::c_Qe = {
-            0x5A1D,
-            0x2586,
-            0x1114,
-            0x080B,
-            0x03D8,
-            0x01DA,
-            0x00E5,
-            0x006F,
-            0x0036,
-            0x001A,
-            0x000D,
-            0x0006,
-            0x0003,
-            0x0001,
-            0x5A7F,
-            0x3F25,
-            0x2CF2,
-            0x207C,
-            0x17B9,
-            0x1182,
-            0x0CEF,
-            0x09A1,
-            0x072F,
-            0x055C,
-            0x0406,
-            0x0303,
-            0x0240,
-            0x01B1,
-            0x0144,
-            0x00F5,
-            0x00B7,
-            0x008A,
-            0x0068,
-            0x004E,
-            0x003B,
-            0x002C,
-            0x5AE1,
-            0x484C,
-            0x3A0D,
-            0x2EF1,
-            0x261F,
-            0x1F33,
-            0x19A8,
-            0x1518,
-            0x1177,
-            0x0E74,
-            0x0BFB,
-            0x09F8,
-            0x0861,
-            0x0706,
-            0x05CD,
-            0x04DE,
-            0x040F,
-            0x0363,
-            0x02D4,
-            0x025C,
-            0x01F8,
-            0x01A4,
-            0x0160,
-            0x0125,
-            0x00F6,
-            0x00CB,
-            0x00AB,
-            0x008F,
-            0x5B12,
-            0x4D04,
-            0x412C,
-            0x37D8,
-            0x2FE8,
-            0x293C,
-            0x2379,
-            0x1EDF,
-            0x1AA9,
-            0x174E,
-            0x1424,
-            0x119C,
-            0x0F6B,
-            0x0D51,
-            0x0BB6,
-            0x0A40,
-            0x5832,
-            0x4D1C,
-            0x438E,
-            0x3BDD,
-            0x34EE,
-            0x2EAE,
-            0x299A,
-            0x2516,
-            0x5570,
-            0x4CA9,
-            0x44D9,
-            0x3E22,
-            0x3824,
-            0x32B4,
-            0x2E17,
-            0x56A8,
-            0x4F46,
-            0x47E5,
-            0x41CF,
-            0x3C3D,
-            0x3787,
-            0x5231,
-            0x4C0F,
-            0x4639,
-            0x415E,
-            0x5627,
-            0x50E7,
-            0x4B85,
-            0x5597,
-            0x504F,
-            0x5A10,
-            0x5522,
-            0x59EB
-    };
+    xQeModel& xQeModel::getInstance()
+    {
+        static xQeModel instance;
+        return instance;
+    }
 
     uint16_t xArithCoreModel::getQe() const {
-        return STATIC_STATE_TABLE[m_ProbIndex].m_Qe;
+        // Now this can use the new getEntry function for consistency
+        return xQeModel::getInstance().getEntry(m_ProbIndex).m_Qe;
     }
 
     void xArithCoreModel::update(bool is_mps)
     {
         if (is_mps)
         {
-            updateMPS();
+            m_ProbIndex = xQeModel::STATIC_STATE_TABLE[m_ProbIndex].m_nextMPS;
         }
-        else
+        else // is LPS
         {
-            updateLPS();
+            // The responsibility for flipping MPS is now with the caller.
+            // This function now only handles the state index transition.
+            m_ProbIndex = xQeModel::STATIC_STATE_TABLE[m_ProbIndex].m_nextLPS;
         }
-    }
-
-    void xArithCoreModel::updateMPS() {
-        m_ProbIndex = STATIC_STATE_TABLE[m_ProbIndex].m_nextMPS;
-    }
-
-    void xArithCoreModel::updateLPS() {
-        if (STATIC_STATE_TABLE[m_ProbIndex].m_switchMPS) {
-            m_MPS = 1 - m_MPS;
-        }
-        m_ProbIndex = STATIC_STATE_TABLE[m_ProbIndex].m_nextLPS;
     }
 
     // context-index S is determined by the statistical model and is, in general, a function of the previous coding decisions
@@ -315,21 +197,7 @@ namespace PMBB_NAMESPACE::JPEG {
         // TODO: implementation
     }
 
-//=============================================================================================================================================================================
-
-    xQeModel::xQeModel() : state_table(STATIC_STATE_TABLE) {}
-
-    xQeModel& xQeModel::getInstance() {
-        static xQeModel instance;
-        return instance;
-    }
-
-    const StateEntry& xQeModel::getEntry(size_t index) const {
-        if (index >= NUM_STATES) {
-            throw std::out_of_range("Index sis out of range (0-112).");
-        }
-        return state_table[index];
-    }
-//=====================================================================================================================================================================================
-//end of namespace PMBB::JPEG
+    //=============================================================================================================================================================================
+    //=====================================================================================================================================================================================
+    //end of namespace PMBB::JPEG
 }
