@@ -100,140 +100,97 @@ namespace PMBB_NAMESPACE::JPEG {
     class xArithCoreEncT : public xArithCoreCommon
     {
     public:
-		xArithCoreEncT(T_Bitstream& bitstream) : m_Bitstream(bitstream), m_B(0)
-            {
-                m_A  = 0;
-                m_C  = 0;
-                m_CT = 0;
-                m_ST = 0;
-                m_renormalization_occurred = false;
-                m_ByteBuffer = nullptr;
-            }
+        xArithCoreEncT(T_Bitstream& bitstream) : m_Bitstream(bitstream), m_B(0)
+        {
+            m_A = 0;
+            m_C = 0;
+            m_CT = 0;
+            m_ST = 0;
+            m_renormalization_occurred = false;
+            m_ByteBuffer = nullptr;
+        }
 
         void initialize()
         {
             m_A = 0x10000;
             m_C = 0;
-            m_CT = 11; // 11 bits are available in the buffer before the first byte is full.
-            m_ST = 0; // Stack counter/Count of pending bits to be written
+            m_CT = 11;
+            m_ST = 0;
             m_B = 0;
-            m_renormalization_occurred = false; // Reset flag on initialization
+            m_renormalization_occurred = false;
         }
 
         void encodeBinMP(uint32_t BinValue, xArithCoreModel& CtxModel) //Code_0(S) + Code_1(S) - Encodes a single binary symbol using the provided context model/index
             //S is a context-index which identifies a particular conditional probability estimate used in coding the binary decision
         {
-            // Get MPS and Qe (LPS probability)
             uint8_t  ProbIndex = CtxModel.getProbIndex();
             uint8_t  MPS = CtxModel.getMPS();
             const auto& QeEntry = xQeModel::xQeModel::getInstance().getEntry(ProbIndex);
-            uint16_t Qe = xQeModel::getQeValue(ProbIndex); //QeEntry.m_Qe;
-
-            // Calculating the subinterval size for MPS
-            uint32_t AMps = m_A - Qe;
-
+            uint16_t Qe = xQeModel::getQeValue(ProbIndex);
+            m_A -= Qe;
             bool is_mps = (BinValue == MPS);
-            bool conditional_exchange = false;
-            // Reset flags at the beginning of each symbol encoding.
-            // This will ensure that the flag reflects the state *only* for the current operation.
+            bool modelUpdate = false;
+            bool doRenormalization = false;
             m_renormalization_occurred = false;
-
             if (is_mps) // MPS Path
             {
-                // Completely changed structure to avoid uint underflow when m_A < Qe.
-                // Logic is now separated into safe paths.
-                if (m_A < Qe)
+                if (m_A < 0x8000)
                 {
-                    // This is a forced conditional exchange because A is too small.
-                    // LPS coding logic is applied to MPS.
-                    // C_new = C + (A - Qe), A_new = Qe
-                    // To avoid overflow, we calculate it as: C_new = C - (Qe - A)
-                    // Unification of the arithmetic operation with the second path of conditional exchange.
-                    //m_C -= (Qe - m_A); //m_C += m_A - Qe;
-                    //uint32_t newC = static_cast<uint32_t>(static_cast<uint64_t>(m_C) + static_cast<uint64_t>(m_A) - static_cast<uint64_t>(Qe));
-                    //m_C = newC;
-                    m_C = safeAddAminusQ(m_C, m_A, Qe);
-                    if ((m_C >> 24) != 0) { // adjust threshold if you want earlier detection
-                        printf("[ASSERT-WARN] large high bits in C after update: C=0x%08X (A=0x%04X Qe=0x%04X)\n",
-                            m_C, m_A, Qe);
-                    }
-                    m_A = Qe;
-                    conditional_exchange = true;
-                }
-                else
-                {
-                    // m_A >= Qe, so subtraction is safe.
-                    uint32_t AMps_local = m_A - Qe;
-                    if (AMps_local < Qe)
+                    if (m_A < Qe)
                     {
-                        // This is the second, standard type of conditional exchange.
-                        m_C += AMps_local;
-                        if ((m_C >> 24) != 0) { // adjust threshold if you want earlier detection
+                        m_C += m_A;
+                        if ((m_C >> 24) != 0) {
                             printf("[ASSERT-WARN] large high bits in C after update: C=0x%08X (A=0x%04X Qe=0x%04X)\n",
                                 m_C, m_A, Qe);
                         }
                         m_A = Qe;
-                        conditional_exchange = true;
                     }
                     else
                     {
-                        // Standard MPS encoding.
-                        m_A = AMps_local;
                     }
+                    doRenormalization = true;
+                    modelUpdate = true;
                 }
             }
             else // LPS Path
             {
-                // Unify logic with MPS to prevent overflow, when m_A < Qe.
-                // This case should not occur if the encoder is in the correct state.
-                /*
                 if (m_A < Qe)
                 {
-                    m_C -= (Qe - m_A);
                 }
-                else
-                {
-                    m_C += m_A - Qe;
+                else {
+                    m_C += m_A;
+                    m_A = Qe;
                 }
-                m_A = Qe;
-                */
-                //m_C = static_cast<uint32_t>(static_cast<uint64_t>(m_C) + static_cast<uint64_t>(m_A) - static_cast<uint64_t>(Qe));
-                m_C = safeAddAminusQ(m_C, m_A, Qe);
+                doRenormalization = true;
+                modelUpdate = true;
                 if ((m_C >> 24) != 0) { // adjust threshold if you want earlier detection
                     printf("[ASSERT-WARN] large high bits in C after update: C=0x%08X (A=0x%04X Qe=0x%04X)\n",
                         m_C, m_A, Qe);
                 }
-                m_A = Qe;
             }
-            if (m_A < 0x8000)
-            {
-                renormalize();
-            }
-            // Model update logic must distinguish between true LPS, conditional exchange, and true MPS.
-            if (!is_mps) // True LPS
-            {
-                // For a true LPS, check if the MPS sense should be flipped.
-                if (xQeModel::getInstance().getEntry(CtxModel.getProbIndex()).m_switchMPS)
+            if (modelUpdate) {
+                if (!is_mps) // True LPS
                 {
-                    CtxModel.flipMPS();
-                }
-                // Update the probability index.
-                CtxModel.update(false);
-            }
-            else // BinValue == MPS
-            {
-                if (conditional_exchange) // MPS with conditional exchange
-                {
-                    // Update index as if it were an LPS, but DO NOT flip MPS sense.
+                    // For a true LPS, check if the MPS sense should be flipped.
+                    if (xQeModel::getInstance().getEntry(CtxModel.getProbIndex()).m_switchMPS)
+                    {
+                        CtxModel.flipMPS();
+                    }
+                    // Update the probability index.
                     CtxModel.update(false);
                 }
-                else if (m_renormalization_occurred) // True MPS with renormalization
+                else // BinValue == MPS
                 {
-                    // Update the probability index.
-                    CtxModel.update(true);
+                    if (modelUpdate) // MPS with conditional exchange
+                    {
+                        CtxModel.update(true);
+                    }
                 }
-                // If it's a true MPS without renormalization, the model state is not changed.
             }
+            if (doRenormalization) {
+                renormalize();
+			}
+
         }
 
         /**
@@ -247,7 +204,9 @@ namespace PMBB_NAMESPACE::JPEG {
             m_renormalization_occurred = false;
             return flag_status;
         }
+
         uint8_t getB() const { return m_B; }
+
         void renormalize() // Renormalizes the interval and outputs any determined bits
         {
             int shifts = 0;
@@ -257,10 +216,8 @@ namespace PMBB_NAMESPACE::JPEG {
             do {
                 uint32_t beforeC = m_C;
                 uint32_t beforeA = m_A;
-				uint16_t Qe = xQeModel::getQeValue(0); //xQeModel::getInstance().getEntry(0).m_Qe; // For logging purposes, we use index 0 as a reference.
-                int shifts = 0;
                 printf("[ENC-UPD] iter=%d beforeC=0x%08X A=0x%04X Qe=0x%04X afterC=0x%08X\n",
-                    current_iter, beforeC, beforeA, Qe, m_C);
+                    current_iter, beforeC, beforeA, m_C);
                 if ((m_C >> 20) != 0) {
                     printf("[WARN] high bits in C: C=0x%08X T=%u at iter=%d\n", m_C, (m_C >> 20), current_iter);
                 }
@@ -272,6 +229,7 @@ namespace PMBB_NAMESPACE::JPEG {
                 {
                     // When the counter reaches zero, we need to write a byte
                     writeByte(); // This function handles bit buffering and output.
+                    m_CT = 8;
                 }
                 current_iter++;
             } while (m_A < 0x8000); // Repeat until A is large enough
@@ -279,59 +237,42 @@ namespace PMBB_NAMESPACE::JPEG {
 
         void writeByte()
         {
-            uint32_t T = (m_C >> 20);
-			static int current_iter = 0; // For debugging purposes
+            uint32_t T = (m_C >> 19);
+			static int current_iter = 0; 
             printf("[BYTE_OUT] iter=%d T=%u m_B(before)=0x%02X m_ST=%d -> branch=%s\n",
                 current_iter, T, m_B, m_ST, (T > 0xFF ? "carry" : ((T & 0xFF) == 0xFF ? "stack" : "normal")));
             if (T > 0xFF)
             {
-                // carry to previous byte
                 uint8_t oldB = m_B;
                 uint8_t newB = static_cast<uint8_t>(oldB + 1); // increment (may wrap)
-                m_Bitstream.writeByte(newB);
-
-                // If previous byte was 0xFF, an extra 0x00 stuffing byte must be written.
-                if (oldB == 0xFF) {
-                    m_Bitstream.writeByte(0x00); // Stuff_0 for carry
+                if (oldB == 0xFF) 
+                {
                 }
-
-                // Output stacked zeros (these represent previously deferred 0xFF results)
-                for (int i = 0; i < m_ST; ++i) {
-                    m_Bitstream.writeByte(0x00);
+                for (int i = 0; i < m_ST; ++i) 
+                {
                 }
                 m_ST = 0;
-
                 // Update B for next iteration
                 m_B = static_cast<uint8_t>(T & 0xFF);
             }
             else if ((T & 0xFF) == 0xFF)
             {
-                // Defer writing 0xFF: increment the stack
                 m_ST++;
             }
 
             else
             {
-                // Normal byte: write previous B
-                m_Bitstream.writeByte(m_B);
-
-                // If we had stacked deferred 0xFFs, write them with stuffing 0x00 after each 0xFF
                 if (m_ST > 0)
                 {
                     for (int i = 0; i < m_ST; ++i)
                     {
-                        m_Bitstream.writeByte(0xFF);
-                        m_Bitstream.writeByte(0x00); // Stuffing after every 0xFF
                     }
                     m_ST = 0;
                 }
 
                 m_B = static_cast<uint8_t>(T & 0xFF);
             }
-
-            // keep only lower 20 bits of C (rest used via T)
-            m_C &= 0xFFFFF;
-            m_CT = 7;
+            m_C &= 0x7FFFF;
         }
 
         /**
@@ -411,7 +352,7 @@ namespace PMBB_NAMESPACE::JPEG {
             discard_final_zeros();
 
             // Make sure all data from the writer's temporary buffer has been written
-            m_Bitstream.flushToBuffer();
+            //m_Bitstream.flushToBuffer();
         }
 
 
@@ -430,32 +371,27 @@ namespace PMBB_NAMESPACE::JPEG {
             return static_cast<uint32_t>(tmp & 0xFFFFFFFFu);
         }
     };
-
     // Alias ​​for backward compatibility in the rest of the code
     using xArithCoreEnc = xArithCoreEncT<xBitstreamWriter>;
-
     //=====================================================================================================================================================================================
     class xArithCoreDec : public xArithCoreCommon
 	{
     public:
-        //xArithmeticDecoder(xBitstreamReader& bitstream) : m_Bitstream(bitstream) {}
         void start();
 		void start(const std::function<bool()>& bit_reader); // Initializes the decoder state
 		uint32_t decodeBinMP(const xArithCoreModel& Model); // Decodes a single binary symbol using the provided context model
         void setByteBuffer(xByteBuffer* buffer);
         void finish();
 	private:
-		uint32_t m_value; // Current value from the input stream
-		bool     m_bFF; // Flag indicating if the last byte was 0xFF
+		uint32_t m_value;          // Current value from the input stream
+		bool     m_bFF;            // Flag indicating if the last byte was 0xFF
         bool     m_bByteAvailable; // Flag indicating if a byte is available for input
-        xBitstreamReader m_Bitstream;
 	};
 
 	//TODO - test using - K.4 Additional information on arithmetic coding
     //=====================================================================================================================================================================================
     // layer 2 - coefficient codding (engine - Annex D)TBD) //F.1.4
     //=====================================================================================================================================================================================
-
     //=====================================================================================================================================================================================
 
     class xQeModel {
@@ -477,10 +413,10 @@ namespace PMBB_NAMESPACE::JPEG {
         static constexpr size_t getNumStates() { return NUM_STATES; }
 
         /**
-  * @brief Zwraca wartość Qe dla danego indeksu stanu.
-  * Definicja funkcji znajduje się BEZPOŚREDNIO tutaj, w pliku nagłówkowym,
-  * co jest wymagane dla funkcji inline.
-  */
+      * @brief Zwraca wartość Qe dla danego indeksu stanu.
+      * Definicja funkcji znajduje się BEZPOŚREDNIO tutaj, w pliku nagłówkowym,
+      * co jest wymagane dla funkcji inline.
+      */
         static inline uint16_t getQeValue(uint8_t stateIndex)
         {
             // Upewnij się, że STATIC_STATE_TABLE jest widoczna tutaj.
