@@ -701,13 +701,13 @@ static const std::array<tTraceEntry, 256> DecoderTrace =
             Buff.appendBytes(EncodedBytes.data(), EncodedBytes.size());
             Dec.setByteBuffer(&Buff);
 
-            Dec.start();
+            Dec.Initdec();
 
             for (size_t i = 0; i < DecoderTrace.size(); i++)
             {
                 checkDecoder(Model, Dec, DecoderTrace[i]);
                 const uint32 RefBin = DecoderTrace[i].D;
-                uint32 DecBin = Dec.decodeBinMP(Model);
+                uint32 DecBin = Dec.Decode(Model);
                 CHECK(RefBin == DecBin);
             }
         }
@@ -751,7 +751,7 @@ static const std::array<tTraceEntry, 256> DecoderTrace =
 
             State = xTestUtils::c_XorShiftSeed;
             Model.init();
-            Dec.start();
+            Dec.Initdec();
             for (int32 i = 0; i < c_NumUnits; i++)
             {
                 State = xTestUtils::xXorShift32(State);
@@ -759,18 +759,18 @@ static const std::array<tTraceEntry, 256> DecoderTrace =
                 uint32 Data = 0;
                 for (int32 j = 0; j < 32; j++)
                 {
-                    Data |= (Dec.decodeBinMP(Model) << j);
+                    Data |= (Dec.Decode(Model) << j);
                 }
                 CHECK(Data == State);
             }
             for (int32 i = 0; i < 256; i++)
             {
-                int32 D = Dec.decodeBinMP(Model);
+                int32 D = Dec.Decode(Model);
                 CHECK(D == 0);
             }
             for (int32 i = 0; i < 256; i++)
             {
-                int32 D = Dec.decodeBinMP(Model);
+                int32 D = Dec.Decode(Model);
                 CHECK(D == 1);
             }
             Dec.finish();
@@ -826,8 +826,12 @@ public:
     }
 };
 
-
 TEST_CASE("testEnc")
 {
     testEnc();
+}
+
+TEST_CASE("testDec")
+{
+    //testDec();
 }

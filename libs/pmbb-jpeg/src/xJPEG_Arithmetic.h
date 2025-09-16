@@ -70,23 +70,24 @@ namespace PMBB_NAMESPACE::JPEG {
         // Legacy Qe table for compatibility with code expecting c_Qe
         //static const std::array<uint32_t, 113> c_Qe;
 
-        uint32_t getA() const { return m_A; }
-        uint32_t getC() const { return m_C; }
-        int32_t  getCT() const { return m_CT; }
+        uint32_t getA()  const { return m_A;  }
+        uint32_t getC()  const { return m_C;  }
+        uint32_t getCT() const { return m_CT; }
         uint32_t getST() const { return m_ST; }
 
     protected:
         xByteBuffer* m_ByteBuffer = nullptr; // it should be a pointer
                                     // MSB                                LSB
         uint32_t m_A;               // 00000000, 00000000, aaaaaaaa, aaaaaaaa
+        uint8_t  m_B;               // Previous byte
         uint32_t m_C;               // 0000cbbb, bbbbbsss, xxxxxxxx, xxxxxxxx
         // a - fractional bits in the A-register (the current probability interval value)
         // b - indicate the bit positions from which the completed bytes of data are removed from the C-register
         // c - carry bit
         // s - optional spacer bits which provide useful constraints on carry-over
         // x - fractional bits in the code register
-        int32_t  m_CT;             // Bit counter for output byte
-        uint32_t m_ST;             // Byte being constructed for output
+        uint32_t  m_CT;             // Bit counter for output byte
+        uint32_t  m_ST;             // Byte being constructed for output
         //any register conventions which allow resolution of carry-over in the encoder and which produce the same entropy-coded segment may be used
 
         //Except at the time of initialization, bit 15 of the A - register is always set and bit 16 is always clear(the LSB is bit 0).
@@ -98,10 +99,11 @@ namespace PMBB_NAMESPACE::JPEG {
     class xArithCoreEncT : public xArithCoreCommon
     {
     public:
-        xArithCoreEncT(T_Bitstream& bitstream) : m_Bitstream(bitstream), m_B(0)
+        xArithCoreEncT(T_Bitstream& bitstream) : m_Bitstream(bitstream)
         {
-            m_A = 0;
-            m_C = 0;
+            m_A  = 0;
+		    m_B  = 0;
+            m_C  = 0;
             m_CT = 0;
             m_ST = 0;
             m_renormalization_occurred = false;
@@ -360,14 +362,14 @@ namespace PMBB_NAMESPACE::JPEG {
             Byte_out();
             discard_final_zeros();
 
+
             // Make sure all data from the writer's temporary buffer has been written
             //m_Bitstream.flushToBuffer();
         }
 
-
     protected:
         T_Bitstream& m_Bitstream;
-        uint8_t  m_B; // Previous byte
+        //uint8_t  m_B; // Previous byte
         bool     m_isFirstByte;
         uint8_t m_BypassCount = 0;
         bool m_renormalization_occurred;
@@ -387,12 +389,42 @@ namespace PMBB_NAMESPACE::JPEG {
     class xArithCoreDec : public xArithCoreCommon
 	{
     public:
-        void start();
-		void start(const std::function<bool()>& bit_reader); // Initializes the decoder state
-		uint32_t decodeBinMP(const xArithCoreModel& Model); // Decodes a single binary symbol using the provided context model
-        void setByteBuffer(xByteBuffer* buffer);
-        void finish();
+        void Initdec();                                          // Initialize the decoder
+		//void start(const std::function<bool()>& bit_reader);   // Initializes the decoder state
+        uint32 MPS             (const xArithCoreModel& S); // more probable symbol for context-index S
+        uint32 Decode                (xArithCoreModel& S); // Decode a binary decision with context-index S
+        uint32 Cond_LPS_exchange     (xArithCoreModel& S); // Decoder LPS path conditional exchange procedure
+        uint32 Cond_MPS_exchange     (xArithCoreModel& S); // Decoder MPS path conditional exchange procedure
+        void   Estimate_QeS_after_MPS(xArithCoreModel& S);
+        void   Estimate_QeS_after_LPS(xArithCoreModel& S);
+        void   Renorm_d();                                 // Decoder renormalization procedure
+		void   Byte_in();
+        void   Unstuff_0();
+        void   setByteBuffer(xByteBuffer* buffer);
+        void   finish();
+        // Composes CLow and Cx into a full C register (32-bit)
+        inline uint32_t MakeC(uint16_t CLow, uint16_t Cx)
+        {
+            // CLow = bbbbbbbb00000000
+            // C = (CLow << 16) | Cx
+            return (static_cast<uint32_t>(CLow) << 16) | Cx;
+        }
+
+        // Decomposes the full C register into CLow and Cx
+        inline void SplitC(uint32_t C, uint16_t& CLow, uint16_t& Cx)
+        {
+            // CLow = lower 16 bits
+            CLow = static_cast<uint16_t>(C & 0xFFFF);
+            // Cx = upper 16 bits
+            Cx = static_cast<uint16_t>((C >> 16) & 0xFFFF);
+        }
+
 	private:
+        uint8_t* m_BP;             // pointer to compressed data
+        uint16_t m_Cx;             // high order 16 bits of arithmetic decoder code register
+        uint16_t m_CLow;           // high order 16 bits of arithmetic decoder code register
+		uint32_t m_BPST;		   // pointer to byte before start of entropy-coded segment
+        uint32_t m_D;              // decision decoded
 		uint32_t m_value;          // Current value from the input stream
 		bool     m_bFF;            // Flag indicating if the last byte was 0xFF
         bool     m_bByteAvailable; // Flag indicating if a byte is available for input
@@ -422,11 +454,7 @@ namespace PMBB_NAMESPACE::JPEG {
 
         static constexpr size_t getNumStates() { return NUM_STATES; }
 
-        /**
-        * @brief zwraca wartość Qe dla danego indeksu stanu.
-        * Definicja funkcji znajdującej się BEZPOŚREDNIO tutaj, w pliku nagłówkowym,
-        * jest wymagane dla funkcji inline.
-        */
+        // Returns the Qe value for a given state index.
         static inline uint16_t getQeValue(uint8_t stateIndex)
         {
             return xQeModel::STATIC_STATE_TABLE[stateIndex].m_Qe;

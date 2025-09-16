@@ -173,17 +173,144 @@ namespace PMBB_NAMESPACE::JPEG {
 // layer 1 - arithmetic codec core - Annex D        
 //=============================================================================================================================================================================
 
-    void xArithCoreDec::start() {
-        // TODO: implementation
+    void xArithCoreDec::Initdec()
+    {
+        // Initialize statistics areas
+        uint32_t newSize = m_ByteBuffer->getDataSize();
+        uint8_t* data = m_ByteBuffer->getReadPtr();
+		m_BP = data - 1;
+		m_A = 0x00000;
+        /*Although the probability interval is initialized to X’10000’ in both Initenc and Initdec,
+        the precision of the probability interval register can still be limited to 16 bits.
+        When the precision of the interval register is 16 bits, it is initialized to zero.*/
+		m_C = 0;
+        m_CLow = 0;
+        m_Cx = 0;
+		Byte_in();
+		//m_C = m_C << 8;
+        m_CLow = m_CLow << 8;
+        Byte_in();
+        //m_C = m_C << 8;
+        m_CLow = m_CLow << 8;
+        MakeC(m_CLow, m_Cx);
+		m_CT = 0;
     }
 
-    void xArithCoreDec::start(std::function<bool(void)> const& callback) {
-        // TODO: implementation
+    uint32 xArithCoreDec::Decode(xArithCoreModel& S) {
+		m_A = m_A - S.getQe();//A = A – Qe(S)
+        if (m_Cx < m_A)
+        {
+            if (m_A < 0x8000)
+            {
+                m_D = Cond_MPS_exchange(S);
+                Renorm_d();
+            }
+            m_D = MPS(S);
+        }
+		else
+        {
+            m_D = Cond_LPS_exchange(S);
+        }
+        Renorm_d();
+		return m_D;
     }
 
-    unsigned int xArithCoreDec::decodeBinMP(xArithCoreModel const& model) {
-        // TODO: implementation
-        return 0;
+    uint32 xArithCoreDec::MPS(const xArithCoreModel& S)
+    {
+        return S.getMPS();
+    }
+
+    uint32 xArithCoreDec::Cond_LPS_exchange(xArithCoreModel& S)
+    {
+        if (m_A < S.getQe())//A < Qe(S)
+        {
+			m_D = MPS(S);
+			m_Cx = m_Cx - m_A;//Cx = Cx – A
+			m_A = S.getQe();//A = Qe(S)
+			Estimate_QeS_after_MPS(S);
+        }
+        else
+        {
+            m_D = 1 - MPS(S);
+            m_Cx = m_Cx - m_A;//Cx = Cx – A
+            m_A = S.getQe();//A = Qe(S)
+            Estimate_QeS_after_LPS(S);
+        }
+        return m_D;
+    }
+
+    uint32 xArithCoreDec::Cond_MPS_exchange(xArithCoreModel& S)
+    {
+        if (m_A < S.getQe())//A < Qe(S)
+        {
+            m_D = 1 - MPS(S);
+            Estimate_QeS_after_LPS(S);
+        }
+        else
+        {
+            m_D = MPS(S);
+            Estimate_QeS_after_MPS(S);
+        }
+        return m_D;
+    }
+
+    void xArithCoreDec::Estimate_QeS_after_MPS(xArithCoreModel& S)
+    {
+        S.update(true); // Update using the MPS transition path
+    }
+
+    void xArithCoreDec::Estimate_QeS_after_LPS(xArithCoreModel& S)
+    {
+        // For a true LPS, check if the MPS sense should be flipped before updating
+        if (xQeModel::getInstance().getEntry(S.getProbIndex()).m_switchMPS)
+        {
+            S.flipMPS();
+        }
+        S.update(false); // Update using the LPS transition path
+    }
+
+    void xArithCoreDec::Renorm_d()
+    {
+        do
+        {
+            if (m_CT == 0)
+            {
+                Byte_in();
+				m_CT = 8;
+            }
+			m_A <<= 1;
+            MakeC(m_CLow, m_Cx);
+			m_C <<= 1;
+            SplitC(m_C, m_CLow, m_Cx);
+			m_CT = m_CT - 1;
+        } while (m_A < 0x8000);
+    }
+
+    void xArithCoreDec::Byte_in()
+    {
+        m_BP = m_BP + 1;
+        if (m_B == 0xFF)
+        {
+            Unstuff_0();
+        }
+        else
+        {
+			m_CLow = m_CLow + (m_B << 8);
+        }
+    }
+
+    void xArithCoreDec::Unstuff_0()
+    {
+		m_BP = m_BP + 1;
+        if (m_B == 0)
+        {
+			m_CLow = m_CLow | 0xFF00;
+        }
+        else
+        {
+            // Interpret_marker
+            // AdjustBP
+        }
     }
 
     void xArithCoreDec::setByteBuffer(xByteBuffer* buffer) {
