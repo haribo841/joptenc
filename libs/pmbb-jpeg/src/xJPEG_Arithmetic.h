@@ -88,6 +88,9 @@ namespace PMBB_NAMESPACE::JPEG {
         // x - fractional bits in the code register
         uint32_t  m_CT;             // Bit counter for output byte
         uint32_t  m_ST;             // Byte being constructed for output
+        bool     m_isFirstByte;     // true until first byte is output via Byte_out()
+        bool     m_renormalization_occurred;
+        uint8_t m_BypassCount = 0;
         //any register conventions which allow resolution of carry-over in the encoder and which produce the same entropy-coded segment may be used
 
         //Except at the time of initialization, bit 15 of the A - register is always set and bit 16 is always clear(the LSB is bit 0).
@@ -106,6 +109,7 @@ namespace PMBB_NAMESPACE::JPEG {
             m_C  = 0;
             m_CT = 0;
             m_ST = 0;
+            m_isFirstByte = true;
             m_renormalization_occurred = false;
             m_ByteBuffer = nullptr;
         }
@@ -127,7 +131,7 @@ namespace PMBB_NAMESPACE::JPEG {
             uint8_t  ProbIndex = CtxModel.getProbIndex();
             uint8_t  MPS = CtxModel.getMPS();
             const auto& QeEntry = xQeModel::xQeModel::getInstance().getEntry(ProbIndex);
-            uint16_t Qe = xQeModel::getQeValue(ProbIndex);
+            uint16_t Qe = QeEntry.m_Qe;
             m_A -= Qe;
             bool is_mps = (BinValue == MPS);
             bool modelUpdate = false;
@@ -357,22 +361,14 @@ namespace PMBB_NAMESPACE::JPEG {
             // Step 4: Shift register C left by 8 bits (C = SLL C 8)
             m_C <<= 8;
 
-
             // Step 5: Call Byte_out and Discard_final_zeros
             Byte_out();
             discard_final_zeros();
-
-
-            // Make sure all data from the writer's temporary buffer has been written
-            //m_Bitstream.flushToBuffer();
         }
 
     protected:
         T_Bitstream& m_Bitstream;
         //uint8_t  m_B; // Previous byte
-        bool     m_isFirstByte;
-        uint8_t m_BypassCount = 0;
-        bool m_renormalization_occurred;
         // Safe arithmetic helper: computes C + A - Qe using a 64-bit intermediate
         inline uint32_t safeAddAminusQ(uint32_t C, uint32_t A, uint32_t Qe)
         {

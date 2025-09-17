@@ -777,58 +777,168 @@ static const std::array<tTraceEntry, 256> DecoderTrace =
         }
 
         //===============================================================================================================================================================================================================
-
-// Dummy bitstream writer for encoder tests
-class xDummyBitstreamWriter : public xBitstreamWriter {
-public:
-    std::vector<uint8_t> bytes;
-    void writeByte(uint32_t Byte) { bytes.push_back(static_cast<uint8_t>(Byte)); }
-    void writeBit(uint32_t) {}
-    void writeBits(uint32_t, uint32_t) {}
-    uint32_t writeAlign(uint32_t) { return 0; }
-    uint32_t writeBuffer(xByteBuffer*, uint32_t) { return 0; }
-    void flushToBuffer() {}
-    void flushToStream(xStream*) {}
-    uint32_t xFlushEntireTmpToByteBuffer() { return 0; }
-};
-
-// Dummy bitstream reader for decoder tests
-class xDummyBitstreamReader : public xBitstreamReader {
-public:
-    std::vector<uint8_t> bytes;
-    size_t pos = 0;
-    xDummyBitstreamReader(const std::vector<uint8_t>& data) : bytes(data) {}
-    uint32_t readByte() {
-        if (pos < bytes.size()) return bytes[pos++];
-        return 0;
-    }
-    uint32_t readBit() { return 0; }
-    uint32_t readBits(uint32_t) { return 0; }
-    uint32_t readAlign(uint32_t) { return 0; }
-    uint32_t readBuffer(xByteBuffer*, uint32_t) { return 0; }
-    void flushFromBuffer() {}
-    void flushFromStream(xStream*) {}
-    uint32_t flushEntireTmpFromByteBuffer() { return 0; }
-};
-
-// A helper class for testing, allowing access to protected
-// members of the xArithCoreEncT class to verify internal state.
-// A helper class for testing, NOW A TEMPLATE
-template <class T_Bitstream>
-class xTestableArithCoreEncT : public xArithCoreEncT<T_Bitstream> {
-public:
-    xTestableArithCoreEncT(T_Bitstream& writer) : xArithCoreEncT<T_Bitstream>(writer) {}
-
-    void setInternalState(uint32_t A, uint32_t C, int32_t CT = 0) {
-        this->m_A = A;
-        this->m_C = C;
-        this->m_CT = CT;
-    }
-};
-
 TEST_CASE("testEnc")
 {
     testEnc();
+}
+
+TEST_CASE("Carry-over handling when flushing the buffer with real writer") {
+    using namespace PMBB;
+    using namespace PMBB::JPEG;
+
+    // Klasa pomocnicza z metodą do ustawiania stanu
+    class TestableArithCoreEnc : public xArithCoreEncT<xBitstreamWriter> {
+    public:
+        using xArithCoreEncT<xBitstreamWriter>::xArithCoreEncT;
+        void setInternalStateFull(uint32_t A, uint32_t C, int CT,
+            uint8_t B, uint32_t ST, bool isFirst)
+        {
+            m_A = A;
+            m_C = C;
+            m_CT = CT;
+            m_B = B;
+            m_ST = ST;
+            m_isFirstByte = isFirst;
+        }
+    };
+
+    // 1. Bufor i writer
+    xByteBuffer output_buffer(1024);
+    xBitstreamWriter writer;
+    writer.bindByteBuffer(&output_buffer);
+
+    // 2. Encoder
+    TestableArithCoreEnc enc(writer);
+    enc.initialize();
+
+    // 3. Ustaw stan wewnętrzny
+    enc.setInternalStateFull(0x8001, 0xFFFF, 1, /*B*/0x01, /*ST*/2, /*isFirst*/false);
+
+    // 4. Flush
+    enc.finish();
+
+    // 5. Pobierz bajty
+    std::vector<uint8_t> actualBytes(
+        output_buffer.getReadPtr(),
+        output_buffer.getReadPtr() + output_buffer.getDataSize()
+    );
+
+    // 6. Oczekiwane
+    std::vector<uint8_t> expectedBytes = { 0x01, 0xff, 0x00, 0xff, 0x00, 0x00 };
+
+    // 7. Sprawdzenie
+    CHECK(actualBytes == expectedBytes);
+}
+
+TEST_CASE("Arithmetic encoder generates expected EncodedBytes") {
+    using namespace PMBB;
+    using namespace PMBB::JPEG;
+
+    // 1. Bufor i writer
+    xByteBuffer Buff(4096);
+    xBitstreamWriter Writer;
+    Writer.bindByteBuffer(&Buff);
+
+    // 2. Model i Encoder
+    xArithCoreModel Model;
+    Model.init();
+
+    xArithCoreEnc Enc(Writer);
+    Enc.initialize();
+
+    // 3. Zakodowanie wszystkich symboli z EncoderTrace
+    for (size_t i = 0; i < EncoderTrace.size() - 1; i++) {
+        checkEncoder(Model, Enc, EncoderTrace[i]);  // sprawdzenie stanu przed kodowaniem
+        uint32 D = EncoderTrace[i].D;               // symbol do zakodowania
+        Enc.encodeBinMP(D, Model);                  // kodowanie
+    }
+
+    // 4. Finalna weryfikacja stanu przed finish()
+    checkEncoder(Model, Enc, EncoderTrace.back());
+
+    // 5. Flush encodera
+    Enc.finish();
+
+    // 6. Sprawdzenie zgodności bajtów z EncodedBytes
+    static const std::array<uint8_t, 29> EncodedBytes = {
+        0x65, 0x5B, 0x51, 0x44, 0xF7, 0x96, 0x9D, 0x51,
+        0x78, 0x55, 0xBF, 0xFF, 0x00, 0xFC, 0x51, 0x84,
+        0xC7, 0xCE, 0xF9, 0x39, 0x00, 0x28, 0x7D, 0x46,
+        0x70, 0x8E, 0xCB, 0xC0, 0xF6
+    };
+
+    uint32 NumBytesWritten = Buff.getDataSize();
+    REQUIRE(NumBytesWritten == EncodedBytes.size());  // wymaga tej samej liczby bajtów
+
+    for (size_t i = 0; i < EncodedBytes.size(); i++) {
+        uint8_t EncByte = Buff.getReadPtr()[i];
+        uint8_t RefByte = EncodedBytes[i];
+        CHECK(EncByte == RefByte);  // sprawdzenie dokładnej wartości
+    }
+
+    std::cout << ">>> Encoder test completed successfully <<<\n";
+}
+
+TEST_CASE("Arithmetic encoder generates expected EncodedBytes with detailed diff") {
+    using namespace PMBB;
+    using namespace PMBB::JPEG;
+
+    // 1. Bufor i writer
+    xByteBuffer Buff(4096);
+    xBitstreamWriter Writer;
+    Writer.bindByteBuffer(&Buff);
+
+    // 2. Model i Encoder
+    xArithCoreModel Model;
+    Model.init();
+
+    xArithCoreEnc Enc(Writer);
+    Enc.initialize();
+
+    // 3. Kodowanie wszystkich symboli z EncoderTrace
+    for (size_t i = 0; i < EncoderTrace.size() - 1; i++) {
+        checkEncoder(Model, Enc, EncoderTrace[i]);  // sprawdzenie stanu przed kodowaniem
+        uint32 D = EncoderTrace[i].D;               // symbol do zakodowania
+        Enc.encodeBinMP(D, Model);                  // kodowanie
+    }
+
+    // 4. Finalna weryfikacja stanu przed finish()
+    checkEncoder(Model, Enc, EncoderTrace.back());
+
+    // 5. Flush encodera
+    Enc.finish();
+
+    // 6. Sprawdzenie zgodności bajtów z EncodedBytes
+    static const std::array<uint8_t, 29> EncodedBytes = {
+        0x65, 0x5B, 0x51, 0x44, 0xF7, 0x96, 0x9D, 0x51,
+        0x78, 0x55, 0xBF, 0xFF, 0x00, 0xFC, 0x51, 0x84,
+        0xC7, 0xCE, 0xF9, 0x39, 0x00, 0x28, 0x7D, 0x46,
+        0x70, 0x8E, 0xCB, 0xC0, 0xF6
+    };
+
+    uint32 NumBytesWritten = Buff.getDataSize();
+    REQUIRE(NumBytesWritten == EncodedBytes.size());  // wymaga tej samej liczby bajtów
+
+    bool allMatch = true;
+
+    for (size_t i = 0; i < EncodedBytes.size(); i++) {
+        uint8_t EncByte = Buff.getReadPtr()[i];
+        uint8_t RefByte = EncodedBytes[i];
+        if (EncByte != RefByte) {
+            allMatch = false;
+            std::cerr << "Mismatch at byte " << i
+                << ": Encoded=0x" << std::hex << int(EncByte)
+                << " Expected=0x" << std::hex << int(RefByte) << std::dec << "\n";
+        }
+        CHECK(EncByte == RefByte);
+    }
+
+    if (allMatch) {
+        std::cout << ">>> Encoder test completed successfully <<<\n";
+    }
+    else {
+        std::cerr << ">>> Encoder test failed: some bytes do not match <<<\n";
+    }
 }
 
 TEST_CASE("testDec")
