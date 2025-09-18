@@ -4,6 +4,7 @@
     */
 #include "xJPEG_Arithmetic.h"
 #include <stdexcept>
+#include "xJPEG_Entropy.h"
 namespace PMBB_NAMESPACE::JPEG {
     std::vector<bool> hexToBitVector(const std::string& hexString) {
         std::vector<bool> bitVector;
@@ -173,27 +174,43 @@ namespace PMBB_NAMESPACE::JPEG {
 // layer 1 - arithmetic codec core - Annex D        
 //=============================================================================================================================================================================
 
+    void xArithCoreDec::init(uint8_t* buffer, size_t size)
+    {
+        m_pBufferStart = buffer;
+        m_BufferSize = size;
+
+        // pointer na bajt przed początkiem segmentu
+        m_BPST = m_pBufferStart;
+        m_BP = m_BPST - 1;
+
+        m_bFoundEOI = false;
+    }
+
+    uint32_t xArithCoreDec::MakeC(uint16_t CLow, uint16_t Cx)
+    {
+        // CLow = bbbbbbbb00000000
+        // C = (CLow << 16) | Cx
+        return (static_cast<uint32_t>(CLow) << 16) | Cx;
+    }
+
     void xArithCoreDec::Initdec()
     {
-        // Initialize statistics areas
-        uint32_t newSize = m_ByteBuffer->getDataSize();
-        uint8_t* data = m_ByteBuffer->getReadPtr();
-		m_BP = data - 1;
-		m_A = 0x00000;
-        /*Although the probability interval is initialized to X’10000’ in both Initenc and Initdec,
-        the precision of the probability interval register can still be limited to 16 bits.
-        When the precision of the interval register is 16 bits, it is initialized to zero.*/
-		m_C = 0;
+        // Initialize registers
+        m_BP = m_BPST - 1;
+        m_A = 0x10000;  // ✔ standard JPEG
+        m_C = 0;
         m_CLow = 0;
         m_Cx = 0;
-		Byte_in();
-		//m_C = m_C << 8;
-        m_CLow = m_CLow << 8;
+
+        // Load two bytes
         Byte_in();
-        //m_C = m_C << 8;
-        m_CLow = m_CLow << 8;
+        m_CLow <<= 8;
+        Byte_in();
+        m_CLow <<= 8;
+
         MakeC(m_CLow, m_Cx);
-		m_CT = 0;
+
+        m_CT = 0;
     }
 
     uint32 xArithCoreDec::Decode(xArithCoreModel& S) {
@@ -269,47 +286,86 @@ namespace PMBB_NAMESPACE::JPEG {
         S.update(false); // Update using the LPS transition path
     }
 
+    /**
+     * @brief Procedura renormalizacji dekodera, zgodna z Rysunkiem D.19.
+     * @details Przesuwa rejestry A i C w lewo, aż A osiągnie wymaganą wartość,
+     * wczytując nowe bajty danych w razie potrzeby.
+     */
     void xArithCoreDec::Renorm_d()
     {
-        do
+        // Pętla jest wykonywana, dopóki A < 0x8000
+        while (m_A < 0x8000)
         {
+            // Krok 1: Sprawdź licznik bitów CT.
             if (m_CT == 0)
             {
+                // Jeśli CT jest zerem, wczytaj nowy bajt i zresetuj licznik.
                 Byte_in();
-				m_CT = 8;
+                m_CT = 8;
             }
-			m_A <<= 1;
+
+            // Krok 2: Przesuń rejestry i zaktualizuj liczniki.
+            // Zgodnie ze schematem: A=SLL A 1, C=SLL C 1, CT=CT-1
+            m_A <<= 1;
+
+            // Twoja implementacja przesuwania 32-bitowego rejestru C
             MakeC(m_CLow, m_Cx);
-			m_C <<= 1;
+            m_C <<= 1;
             SplitC(m_C, m_CLow, m_Cx);
-			m_CT = m_CT - 1;
-        } while (m_A < 0x8000);
+
+            m_CT--;
+        }
     }
 
+    /**
+     * @brief Procedura wczytywania bajtu, zgodna z Rysunkiem D.20.
+     * @details Pobiera bajt danych, obsługuje "wypchane" zera po bajcie 0xFF
+     * i wstawia dane do rejestru C.
+     */
     void xArithCoreDec::Byte_in()
     {
-        m_BP = m_BP + 1;
-        if (m_B == 0xFF)
-        {
+        m_BP++;
+
+        if (m_BP >= m_pBufferStart + m_BufferSize) {
+            // Zabezpieczenie: koniec danych -> EOI
+            m_bFoundEOI = true;
+            return;
+        }
+
+        uint8_t B = *m_BP;
+
+        // Jeśli to marker 0xFF -> uruchamiamy procedurę „unstuff”
+        if (B == 0xFF) {
             Unstuff_0();
         }
-        else
-        {
-			m_CLow = m_CLow + (m_B << 8);
+        else {
+            m_CLow |= B;
         }
     }
 
+    /**
+     * @brief Procedura obsługi bajtu następującego po 0xFF, zgodna z Rysunkiem D.21.
+     * @details Rozróżnia "wypchane" zero od znacznika (markera) JPEG.
+     */
     void xArithCoreDec::Unstuff_0()
     {
-		m_BP = m_BP + 1;
-        if (m_B == 0)
-        {
-			m_CLow = m_CLow | 0xFF00;
+        // Przesuń wskaźnik
+        m_BP++;
+
+        if (m_BP >= m_pBufferStart + m_BufferSize) {
+            m_bFoundEOI = true;
+            return;
         }
-        else
-        {
-            // Interpret_marker
-            // AdjustBP
+
+        uint8_t B = *m_BP;
+
+        if (B) {
+            // Jeśli po 0xFF nie było 0x00 → marker (koniec danych)
+            m_bFoundEOI = true;
+        }
+        else {
+            // Było „0xFF 0x00” → wstawiamy bajt 0xFF do C
+            m_CLow |= 0xFF;
         }
     }
 

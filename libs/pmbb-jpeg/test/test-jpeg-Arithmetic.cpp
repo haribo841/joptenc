@@ -943,5 +943,5 @@ TEST_CASE("Arithmetic encoder generates expected EncodedBytes with detailed diff
 
 TEST_CASE("testDec")
 {
-    //testDec();
+    testDec();
 }

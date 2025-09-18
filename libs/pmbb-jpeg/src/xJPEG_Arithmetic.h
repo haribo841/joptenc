@@ -113,7 +113,6 @@ namespace PMBB_NAMESPACE::JPEG {
             m_renormalization_occurred = false;
             m_ByteBuffer = nullptr;
         }
-
         void initialize()
         {
             m_A = 0x10000;
@@ -124,7 +123,6 @@ namespace PMBB_NAMESPACE::JPEG {
             m_isFirstByte = true;
             m_renormalization_occurred = false;
         }
-
         void encodeBinMP(uint32_t BinValue, xArithCoreModel& CtxModel) //Code_0(S) + Code_1(S) - Encodes a single binary symbol using the provided context model/index
             //S is a context-index which identifies a particular conditional probability estimate used in coding the binary decision
         {
@@ -189,21 +187,13 @@ namespace PMBB_NAMESPACE::JPEG {
 			}
 
         }
-
-        /**
-        * @brief: Returns whether renormalization has occurred
-        * since the last call to this method and resets the flag.
-        * @return true if renormalization has occurred, false otherwise.
-        */
         bool getAndClearRenormalizationFlag()
         {
             bool flag_status = m_renormalization_occurred;
             m_renormalization_occurred = false;
             return flag_status;
         }
-
         uint8_t getB() const { return m_B; }
-
         void renormalize() // Renormalizes the interval and outputs any determined bits
         {
             int shifts = 0;
@@ -222,7 +212,6 @@ namespace PMBB_NAMESPACE::JPEG {
                 current_iter++;
             } while (m_A < 0x8000); // Repeat until A is large enough
         }
-
         void Byte_out() // Replaces writeByte()
         {
             uint32_t T = (m_C >> 19);
@@ -288,19 +277,12 @@ namespace PMBB_NAMESPACE::JPEG {
             }
             m_C &= 0x7FFFF;
         }
-
-        /**
-        * @brief: Improved method for setting the byte buffer.
-        */
         void setByteBuffer(xByteBuffer* buffer) {
             m_ByteBuffer = buffer; // Setting a pointer in the base class
             m_Bitstream.bindByteBuffer(buffer);
         }
 
         private:
-            /**
-            * @brief: Implements the Clear_final_bits procedure from Figure D.14 of the JPEG standard.
-            */
             void clear_final_bits()
             {
                 uint32_t T = m_C + m_A - 1;
@@ -312,10 +294,6 @@ namespace PMBB_NAMESPACE::JPEG {
                 }
                 m_C = T;
             }
-
-            /**
-            * @brief: Implements the Discard_final_zeros procedure from Figure D.15 of the JPEG standard.
-            */
             void discard_final_zeros()
             {
                 if (!m_ByteBuffer) { return; }
@@ -341,12 +319,6 @@ namespace PMBB_NAMESPACE::JPEG {
             }
 
     public:
-
-        /**
-        * @brief: Replaces the previous finish() method. Implements the Flush procedure from Figure D.13.
-        *
-        * Correctly terminates the arithmetic encoding process according to the JPEG standard.
-        */
         void finish()
         {
             // Step 1: Execute the Clear_final_bits procedure
@@ -379,12 +351,12 @@ namespace PMBB_NAMESPACE::JPEG {
             return static_cast<uint32_t>(tmp & 0xFFFFFFFFu);
         }
     };
-    // Alias ​​for backward compatibility in the rest of the code
     using xArithCoreEnc = xArithCoreEncT<xBitstreamWriter>;
     //=====================================================================================================================================================================================
     class xArithCoreDec : public xArithCoreCommon
 	{
     public:
+        void init(uint8_t* buffer, size_t size);
         void Initdec();                                          // Initialize the decoder
 		//void start(const std::function<bool()>& bit_reader);   // Initializes the decoder state
         uint32 MPS             (const xArithCoreModel& S); // more probable symbol for context-index S
@@ -398,13 +370,9 @@ namespace PMBB_NAMESPACE::JPEG {
         void   Unstuff_0();
         void   setByteBuffer(xByteBuffer* buffer);
         void   finish();
+        // Metoda do powiązania dekodera z buforem danych wejściowych
         // Composes CLow and Cx into a full C register (32-bit)
-        inline uint32_t MakeC(uint16_t CLow, uint16_t Cx)
-        {
-            // CLow = bbbbbbbb00000000
-            // C = (CLow << 16) | Cx
-            return (static_cast<uint32_t>(CLow) << 16) | Cx;
-        }
+        uint32_t MakeC(uint16_t CLow, uint16_t Cx);
 
         // Decomposes the full C register into CLow and Cx
         inline void SplitC(uint32_t C, uint16_t& CLow, uint16_t& Cx)
@@ -415,15 +383,19 @@ namespace PMBB_NAMESPACE::JPEG {
             Cx = static_cast<uint16_t>((C >> 16) & 0xFFFF);
         }
 
-	private:
-        uint8_t* m_BP;             // pointer to compressed data
-        uint16_t m_Cx;             // high order 16 bits of arithmetic decoder code register
-        uint16_t m_CLow;           // high order 16 bits of arithmetic decoder code register
-		uint32_t m_BPST;		   // pointer to byte before start of entropy-coded segment
-        uint32_t m_D;              // decision decoded
-		uint32_t m_value;          // Current value from the input stream
-		bool     m_bFF;            // Flag indicating if the last byte was 0xFF
-        bool     m_bByteAvailable; // Flag indicating if a byte is available for input
+	private:           
+        uint8_t* m_pBufferStart = nullptr; // początek bufora
+        size_t   m_BufferSize = 0;       // rozmiar bufora
+        uint8_t* m_BP = nullptr; // aktualna pozycja w buforze
+        uint8_t* m_BPST = nullptr; // byte przed startem segmentu
+        bool     m_bFoundEOI = false;   // koniec danych?
+
+        // rejestry arytmetyczne
+        uint32_t m_A = 0;
+        uint32_t m_C = 0;
+        uint32_t m_CLow = 0;
+        uint32_t m_Cx = 0;
+        uint32_t m_CT = 0;
 	};
 
 	//TODO - test using - K.4 Additional information on arithmetic coding
